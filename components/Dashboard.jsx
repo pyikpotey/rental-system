@@ -30,6 +30,11 @@ import {
   ClipboardList,
   LogOut,
   FileText,
+  LayoutDashboard,
+  Settings,
+  ReceiptText,
+  Building2,
+  ScrollText,
 } from "lucide-react";
 
 // ✅ Your existing firebase setup
@@ -43,6 +48,7 @@ import {
   doc,
   updateDoc,
   getDoc,
+  setDoc,
   increment,
   query,
   orderBy,
@@ -188,6 +194,78 @@ function computePaymentStatus(totalAmount, amountPaid) {
   return "paid";
 }
 
+/* ---------------------------- GHANA VAT / DOCUMENT HELPERS ---------------------------- */
+
+const GHANA_VAT_RATE = 0.15;
+const GHANA_NHIL_RATE = 0.025;
+const GHANA_GETFUND_RATE = 0.025;
+
+const DEFAULT_COMPANY_PROFILE = {
+  companyName: "MAALVILA Car Rental Services",
+  companyEmail: "maalvilaent@gmail.com",
+  companyPhone: "0209374110 / 0592242429 / 0242164552",
+  companyAddress: "",
+  companyTin: "",
+  vatNumber: "",
+  logoUrl: "",
+  letterheadUrl: "",
+  vatEnabled: true,
+  vatMode: "exclusive", // exclusive | inclusive
+  quotationTerms:
+    "This quotation is subject to vehicle availability, confirmation of booking, and agreed payment terms.",
+  invoiceFooter: "Thank you for doing business with us.",
+  receiptFooter: "Payment received with thanks.",
+};
+
+function generateDocNumber(prefix) {
+  const d = new Date();
+  const rand = String(Math.floor(Math.random() * 10000)).padStart(4, "0");
+  return `${prefix}-${format(d, "yyyyMMdd")}-${rand}`;
+}
+
+function computeGhanaVatSummary(baseAmount, discountAmount = 0, vatEnabled = true) {
+  const subtotal = clampMoney(baseAmount);
+  const discount = Math.min(clampMoney(discountAmount), subtotal);
+  const taxableAmount = Math.max(0, subtotal - discount);
+
+  if (!vatEnabled) {
+    return {
+      subtotal,
+      discount,
+      taxableAmount,
+      vat: 0,
+      nhil: 0,
+      getfund: 0,
+      totalTax: 0,
+      grandTotal: taxableAmount,
+    };
+  }
+
+  const vat = taxableAmount * GHANA_VAT_RATE;
+  const nhil = taxableAmount * GHANA_NHIL_RATE;
+  const getfund = taxableAmount * GHANA_GETFUND_RATE;
+  const totalTax = vat + nhil + getfund;
+  const grandTotal = taxableAmount + totalTax;
+
+  return {
+    subtotal,
+    discount,
+    taxableAmount,
+    vat,
+    nhil,
+    getfund,
+    totalTax,
+    grandTotal,
+  };
+}
+
+function getBookingBaseAmount(b) {
+  if (!b) return 0;
+  const days = normalizeSelectedDates(b.selectedDates).length;
+  const daily = Number(b.dailyRate || 0);
+  return daily * days;
+}
+
 /* ---------------------------- PERMISSIONS ---------------------------- */
 
 function can(role, action) {
@@ -235,6 +313,7 @@ export default function Dashboard() {
 
   const [carNumber, setCarNumber] = useState("");
   const [driver, setDriver] = useState("");
+  const [driverPhone, setDriverPhone] = useState("");
   const [dailyRate, setDailyRate] = useState("");
   const [selectedDates, setSelectedDates] = useState([]);
   const [editBookingId, setEditBookingId] = useState(null);
@@ -269,6 +348,21 @@ export default function Dashboard() {
 
   // UI
   const [loadingRole, setLoadingRole] = useState(true);
+
+  // Tabs / views
+  const [activeView, setActiveView] = useState("overview");
+
+  // Company profile / document settings
+  const [companyProfile, setCompanyProfile] = useState(DEFAULT_COMPANY_PROFILE);
+  const [savingProfile, setSavingProfile] = useState(false);
+
+  // Quotation
+  const [quotationOpen, setQuotationOpen] = useState(false);
+  const [quotationBooking, setQuotationBooking] = useState(null);
+  const [quotationNumber, setQuotationNumber] = useState("");
+  const [quotationNotes, setQuotationNotes] = useState("");
+  const [quotationDiscountType, setQuotationDiscountType] = useState("none"); // none | fixed | percentage
+  const [quotationDiscountValue, setQuotationDiscountValue] = useState("");
 
   /* ---------------------------- AUTH + ROLE ---------------------------- */
 
@@ -360,6 +454,27 @@ export default function Dashboard() {
       unsubCars();
       unsubAudit();
     };
+  }, [user]);
+
+  /* ---------------------------- COMPANY PROFILE ---------------------------- */
+
+  useEffect(() => {
+    if (!user) return;
+
+    const ref = doc(db, "settings", "companyProfile");
+
+    const unsub = onSnapshot(ref, (snap) => {
+      if (snap.exists()) {
+        setCompanyProfile({
+          ...DEFAULT_COMPANY_PROFILE,
+          ...(snap.data() || {}),
+        });
+      } else {
+        setCompanyProfile(DEFAULT_COMPANY_PROFILE);
+      }
+    });
+
+    return () => unsub();
   }, [user]);
 
   // Payments history subscription (only when modal is open)
@@ -609,6 +724,36 @@ export default function Dashboard() {
     await signOut(auth);
   };
 
+  const saveCompanyProfile = async () => {
+    if (!can(role, "addCar")) {
+      return alert("Only Admin can update company settings.");
+    }
+
+    setSavingProfile(true);
+    try {
+      await setDoc(doc(db, "settings", "companyProfile"), {
+        ...companyProfile,
+        updatedAt: serverTimestamp(),
+        updatedBy: user?.uid || "",
+        updatedByEmail: user?.email || roleEmail || "",
+      });
+
+      await addDoc(collection(db, "audit"), {
+        action: `Company profile/settings updated`,
+        userId: user?.email || roleEmail || "",
+        uid: user?.uid || "",
+        time: serverTimestamp(),
+      });
+
+      alert("Company profile saved successfully.");
+    } catch (e) {
+      console.error(e);
+      alert("Could not save company profile.");
+    } finally {
+      setSavingProfile(false);
+    }
+  };
+
   const addCar = async () => {
     if (!can(role, "addCar")) return alert("Only Admin can add cars.");
     if (!newCarName || !newCarNumber) return alert("Fill car name and number.");
@@ -676,6 +821,7 @@ export default function Dashboard() {
       carNumber: String(carNumber),
       carName: carObj?.name || "",
       driver: driver.trim(),
+      driverPhone: (driverPhone || "").trim(),
       dailyRate: Number(dailyRate),
       selectedDates: normSelected,
 
@@ -725,6 +871,7 @@ export default function Dashboard() {
 
     setCarNumber("");
     setDriver("");
+    setDriverPhone("");
     setDailyRate("");
     setSelectedDates([]);
     setEditBookingId(null);
@@ -743,6 +890,7 @@ export default function Dashboard() {
 
     setCarNumber(String(b.carNumber || ""));
     setDriver(b.driver || "");
+    setDriverPhone(b.driverPhone || "");
     setDailyRate(String(b.dailyRate ?? ""));
     setSelectedDates(normalizeSelectedDates(b.selectedDates));
     setEditBookingId(b.id);
@@ -855,6 +1003,7 @@ export default function Dashboard() {
         TravelTo: (b.travelTo || "").replaceAll(",", " "),
         Car: `${b.carName || ""} (${b.carNumber || ""})`.replaceAll(",", " "),
         Driver: (b.driver || "").replaceAll(",", " "),
+        DriverPhone: (b.driverPhone || "").replaceAll(",", " "),
         Status: b.status || "",
         Days: String(days),
         Dates: normalizeSelectedDates(b.selectedDates)
@@ -880,8 +1029,94 @@ export default function Dashboard() {
     document.body.removeChild(link);
   };
 
+  const getQuotationDiscountAmount = (baseAmount) => {
+    const v = Number(quotationDiscountValue || 0);
+    if (!Number.isFinite(v) || v <= 0) return 0;
+
+    if (quotationDiscountType === "percentage") {
+      return baseAmount * (v / 100);
+    }
+
+    if (quotationDiscountType === "fixed") {
+      return v;
+    }
+
+    return 0;
+  };
+
+  const openQuotation = (b) => {
+    setQuotationBooking(b);
+    setQuotationNumber(generateDocNumber("QUO"));
+    setQuotationNotes(companyProfile.quotationTerms || "");
+    setQuotationDiscountType("none");
+    setQuotationDiscountValue("");
+    setActiveView("documents");
+    setQuotationOpen(true);
+  };
+
+  const saveQuotationToAudit = async () => {
+    if (!quotationBooking) return;
+
+    const baseAmount = getBookingBaseAmount(quotationBooking);
+    const discountAmount = getQuotationDiscountAmount(baseAmount);
+    const vatSummary = computeGhanaVatSummary(
+      baseAmount,
+      discountAmount,
+      companyProfile.vatEnabled
+    );
+
+    await addDoc(collection(db, "audit"), {
+      action: `Quotation generated (${quotationNumber}) for ${quotationBooking.customer} — Car ${quotationBooking.carNumber} — Total ${currencyGH(vatSummary.grandTotal)}`,
+      userId: user?.email || roleEmail || "",
+      uid: user?.uid || "",
+      time: serverTimestamp(),
+      quotationNumber,
+      bookingId: quotationBooking.id,
+      documentType: "quotation",
+      vatSummary,
+    });
+
+    await sendEmailNotification({
+      toEmail: quotationBooking.customerEmail,
+      bookingId: quotationBooking.id,
+      actionType: "quotation_generated",
+      subject: `Quotation ${quotationNumber} - ${quotationBooking.carName || ""} (${quotationBooking.carNumber || ""})`,
+      message:
+        `${companyProfile.companyName || "MAALVILA Car Rental Services"}\n` +
+        `${companyProfile.companyPhone ? `Tel: ${companyProfile.companyPhone}\n` : ""}` +
+        `${companyProfile.companyEmail ? `Email: ${companyProfile.companyEmail}\n` : ""}` +
+        `${companyProfile.companyTin ? `TIN: ${companyProfile.companyTin}\n` : ""}` +
+        `${companyProfile.vatNumber ? `VAT No: ${companyProfile.vatNumber}\n` : ""}` +
+        `\nQUOTATION\n` +
+        `Quotation No: ${quotationNumber}\n` +
+        `Customer: ${quotationBooking.customer || ""}\n` +
+        `Car: ${quotationBooking.carName || ""} (${quotationBooking.carNumber || ""})\n` +
+        `Driver: ${quotationBooking.driver || ""}\n` +
+        `${quotationBooking.driverPhone ? `Driver Contact: ${quotationBooking.driverPhone}\n` : ""}` +
+        `Travel: ${(quotationBooking.travelFrom || "")} → ${(quotationBooking.travelTo || "")}\n` +
+        `Dates: ${normalizeSelectedDates(quotationBooking.selectedDates).map(toISODateString).join(", ")}\n` +
+        `Daily Rate: ${currencyGH(quotationBooking.dailyRate || 0)}\n\n` +
+        `Subtotal: ${currencyGH(vatSummary.subtotal)}\n` +
+        `Discount: ${currencyGH(vatSummary.discount)}\n` +
+        `Taxable Amount: ${currencyGH(vatSummary.taxableAmount)}\n` +
+        `VAT @ 15%: ${currencyGH(vatSummary.vat)}\n` +
+        `NHIL @ 2.5%: ${currencyGH(vatSummary.nhil)}\n` +
+        `GETFund @ 2.5%: ${currencyGH(vatSummary.getfund)}\n` +
+        `Grand Total: ${currencyGH(vatSummary.grandTotal)}\n\n` +
+        `${quotationNotes || companyProfile.quotationTerms || ""}\n\n` +
+        `Thank you.`,
+      meta: {
+        quotationNumber,
+        vatSummary,
+      },
+    });
+
+    setQuotationOpen(false);
+  };
+
   const openInvoice = (b) => {
     setInvoiceBooking(b);
+    setActiveView("documents");
     const d = new Date();
     const rand = String(Math.floor(Math.random() * 10000)).padStart(4, "0");
     setInvoiceNumber(`INV-${format(d, "yyyyMMdd")}-${rand}`);
@@ -1090,14 +1325,14 @@ export default function Dashboard() {
 
   return (
     <div className="p-4 md:p-6 space-y-6 max-w-6xl mx-auto bg-slate-50 min-h-screen">
-      {/* HEADER */}
+{/* HEADER */}
       <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-3">
         <motion.h1
           initial={{ opacity: 0, y: -10 }}
           animate={{ opacity: 1, y: 0 }}
           className="text-2xl md:text-3xl font-bold"
         >
-          Rental Dashboard
+          Rental Dashboard - Phase 1 Test
         </motion.h1>
 
         <div className="flex items-center gap-2">
@@ -1116,7 +1351,36 @@ export default function Dashboard() {
         </div>
       </div>
 
-      {/* KPIs */}
+      
+      {/* TABS / VIEWS */}
+      <Card className="rounded-2xl border bg-white">
+        <CardContent className="p-3">
+          <div className="flex flex-wrap gap-2">
+            {[
+              { key: "overview", label: "Overview", icon: <LayoutDashboard className="w-4 h-4" /> },
+              { key: "bookings", label: "Bookings", icon: <ClipboardList className="w-4 h-4" /> },
+              { key: "cars", label: "Cars", icon: <Car className="w-4 h-4" /> },
+              { key: "documents", label: "Documents", icon: <ReceiptText className="w-4 h-4" /> },
+              { key: "settings", label: "Settings", icon: <Settings className="w-4 h-4" /> },
+              { key: "audit", label: "Audit Trail", icon: <FileText className="w-4 h-4" /> },
+            ].map((tab) => (
+              <Button
+                key={tab.key}
+                variant={activeView === tab.key ? "default" : "outline"}
+                className="gap-2"
+                onClick={() => setActiveView(tab.key)}
+              >
+                {tab.icon}
+                {tab.label}
+              </Button>
+            ))}
+          </div>
+        </CardContent>
+      </Card>
+
+      {activeView === "overview" && (
+        <>
+{/* KPIs */}
       <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-3">
         {kpiCards.map((k) => (
           <Card
@@ -1325,7 +1589,12 @@ export default function Dashboard() {
         </CardContent>
       </Card>
 
-      {/* ADD CAR (ADMIN ONLY) */}
+              </>
+      )}
+
+      {activeView === "cars" && (
+        <>
+{/* ADD CAR (ADMIN ONLY) */}
       {can(role, "addCar") && (
         <Card className="rounded-2xl shadow">
           <CardContent className="p-4 space-y-3">
@@ -1350,7 +1619,12 @@ export default function Dashboard() {
         </Card>
       )}
 
-      {/* BOOKING FORM (ADMIN + STAFF) */}
+              </>
+      )}
+
+      {activeView === "bookings" && (
+        <>
+{/* BOOKING FORM (ADMIN + STAFF) */}
       {can(role, "addBooking") && (
         <Card className="rounded-2xl shadow">
           <CardContent className="p-4 space-y-3">
@@ -1358,7 +1632,7 @@ export default function Dashboard() {
               {editBookingId ? "Edit Booking" : "New Booking"}
             </h2>
 
-            <div className="grid md:grid-cols-6 gap-2 items-start">
+            <div className="grid md:grid-cols-7 gap-2 items-start">
               <Input
                 placeholder="Customer Name"
                 value={customer}
@@ -1392,6 +1666,11 @@ export default function Dashboard() {
                 placeholder="Driver Name"
                 value={driver}
                 onChange={(e) => setDriver(e.target.value)}
+              />
+              <Input
+                placeholder="Driver Contact"
+                value={driverPhone}
+                onChange={(e) => setDriverPhone(e.target.value)}
               />
               <Input
                 type="number"
@@ -1564,6 +1843,7 @@ export default function Dashboard() {
                       <div className="text-sm text-gray-700">
                         <b>{b.carName}</b> ({b.carNumber}) • Driver:{" "}
                         <b>{b.driver}</b>
+                        {b.driverPhone ? <span> • Driver Contact: <b>{b.driverPhone}</b></span> : null}
                       </div>
 
                       {(b.travelFrom || b.travelTo) && (
@@ -1652,6 +1932,15 @@ export default function Dashboard() {
                           Record Payment
                         </Button>
                       )}
+
+                      <Button
+                        variant="outline"
+                        className="gap-2"
+                        onClick={() => openQuotation(b)}
+                        title="Generate quotation"
+                      >
+                        <ScrollText className="w-4 h-4" /> Quote
+                      </Button>
 
                       <Button
                         variant="outline"
@@ -1754,7 +2043,176 @@ export default function Dashboard() {
         </Card>
       )}
 
-      {/* INVOICE MODAL */}
+              </>
+      )}
+
+      {activeView === "documents" && (
+        <>
+
+      {/* QUOTATION MODAL */}
+      {activeView === "documents" && quotationOpen && quotationBooking && (
+        <Card className="rounded-2xl border-2">
+          <CardContent className="p-4 space-y-3">
+            <div className="flex items-center justify-between">
+              <h2 className="text-lg font-semibold">Quotation Generator</h2>
+              <Button variant="outline" onClick={() => setQuotationOpen(false)}>
+                Close
+              </Button>
+            </div>
+
+            {companyProfile.letterheadUrl ? (
+              <img
+                src={companyProfile.letterheadUrl}
+                alt="Letterhead"
+                className="w-full max-h-32 object-contain border rounded-xl bg-white"
+              />
+            ) : companyProfile.logoUrl ? (
+              <img
+                src={companyProfile.logoUrl}
+                alt="Logo"
+                className="h-20 object-contain"
+              />
+            ) : null}
+
+            <div className="grid md:grid-cols-4 gap-2">
+              <Input
+                placeholder="Quotation Number"
+                value={quotationNumber}
+                onChange={(e) => setQuotationNumber(e.target.value)}
+              />
+
+              <select
+                className="border rounded-lg p-2 text-sm h-10"
+                value={quotationDiscountType}
+                onChange={(e) => setQuotationDiscountType(e.target.value)}
+              >
+                <option value="none">No Discount</option>
+                <option value="fixed">Fixed Discount</option>
+                <option value="percentage">Percentage Discount</option>
+              </select>
+
+              <Input
+                type="number"
+                placeholder="Discount Value"
+                value={quotationDiscountValue}
+                onChange={(e) => setQuotationDiscountValue(e.target.value)}
+              />
+
+              <Button onClick={saveQuotationToAudit}>Save + Email Quote</Button>
+            </div>
+
+            <Input
+              placeholder="Quotation notes / terms"
+              value={quotationNotes}
+              onChange={(e) => setQuotationNotes(e.target.value)}
+            />
+
+            {(() => {
+              const baseAmount = getBookingBaseAmount(quotationBooking);
+              const discountAmount = getQuotationDiscountAmount(baseAmount);
+              const vatSummary = computeGhanaVatSummary(
+                baseAmount,
+                discountAmount,
+                companyProfile.vatEnabled
+              );
+
+              return (
+                <div className="border rounded-xl p-4 bg-white space-y-2">
+                  <div className="text-center">
+                    <div className="text-xl font-bold">
+                      {companyProfile.companyName || "MAALVILA Car Rental Services"}
+                    </div>
+                    <div className="text-xs text-gray-600">
+                      {companyProfile.companyAddress || ""}
+                    </div>
+                    <div className="text-xs text-gray-600">
+                      {companyProfile.companyPhone || ""}{" "}
+                      {companyProfile.companyEmail ? `• ${companyProfile.companyEmail}` : ""}
+                    </div>
+                    <div className="text-xs text-gray-600">
+                      {companyProfile.companyTin ? `TIN: ${companyProfile.companyTin}` : ""}
+                      {companyProfile.vatNumber ? ` • VAT No: ${companyProfile.vatNumber}` : ""}
+                    </div>
+                  </div>
+
+                  <div className="border-t pt-3">
+                    <div className="text-sm text-gray-600">Quotation</div>
+                    <div className="text-lg font-bold">{quotationNumber}</div>
+                  </div>
+
+                  <div className="grid md:grid-cols-2 gap-2 text-sm">
+                    <div>
+                      Customer: <b>{quotationBooking.customer}</b>
+                    </div>
+                    <div>
+                      Email: <b>{quotationBooking.customerEmail || "—"}</b>
+                    </div>
+                    <div>
+                      Car: <b>{quotationBooking.carName}</b> ({quotationBooking.carNumber})
+                    </div>
+                    <div>
+                      Driver: <b>{quotationBooking.driver || "—"}</b>
+                      {quotationBooking.driverPhone ? (
+                        <span> • {quotationBooking.driverPhone}</span>
+                      ) : null}
+                    </div>
+                    <div>
+                      Travel: <b>{quotationBooking.travelFrom || "—"}</b> →{" "}
+                      <b>{quotationBooking.travelTo || "—"}</b>
+                    </div>
+                    <div>
+                      Dates:{" "}
+                      <b>
+                        {normalizeSelectedDates(quotationBooking.selectedDates)
+                          .map(toISODateString)
+                          .join(", ")}
+                      </b>
+                    </div>
+                  </div>
+
+                  <div className="border-t pt-3 text-sm space-y-1">
+                    <div className="flex justify-between">
+                      <span>Subtotal</span>
+                      <b>{currencyGH(vatSummary.subtotal)}</b>
+                    </div>
+                    <div className="flex justify-between">
+                      <span>Discount</span>
+                      <b>{currencyGH(vatSummary.discount)}</b>
+                    </div>
+                    <div className="flex justify-between">
+                      <span>Taxable Amount</span>
+                      <b>{currencyGH(vatSummary.taxableAmount)}</b>
+                    </div>
+                    <div className="flex justify-between">
+                      <span>VAT @ 15%</span>
+                      <b>{currencyGH(vatSummary.vat)}</b>
+                    </div>
+                    <div className="flex justify-between">
+                      <span>NHIL @ 2.5%</span>
+                      <b>{currencyGH(vatSummary.nhil)}</b>
+                    </div>
+                    <div className="flex justify-between">
+                      <span>GETFund @ 2.5%</span>
+                      <b>{currencyGH(vatSummary.getfund)}</b>
+                    </div>
+                    <div className="flex justify-between border-t pt-2 text-base">
+                      <span>Grand Total</span>
+                      <b>{currencyGH(vatSummary.grandTotal)}</b>
+                    </div>
+                  </div>
+
+                  {quotationNotes ? (
+                    <div className="text-xs text-gray-600 border-t pt-2">
+                      {quotationNotes}
+                    </div>
+                  ) : null}
+                </div>
+              );
+            })()}
+          </CardContent>
+        </Card>
+      )}
+{/* INVOICE MODAL */}
       {invoiceOpen && invoiceBooking && (
         <Card className="rounded-2xl border-2">
           <CardContent className="p-4 space-y-3">
@@ -1780,6 +2238,37 @@ export default function Dashboard() {
             </div>
 
             <div className="border rounded-xl p-3 bg-white">
+              {companyProfile.letterheadUrl ? (
+                <img
+                  src={companyProfile.letterheadUrl}
+                  alt="Letterhead"
+                  className="w-full max-h-32 object-contain border rounded-xl bg-white mb-3"
+                />
+              ) : companyProfile.logoUrl ? (
+                <img
+                  src={companyProfile.logoUrl}
+                  alt="Logo"
+                  className="h-20 object-contain mb-3"
+                />
+              ) : null}
+
+              <div className="text-center mb-3">
+                <div className="text-xl font-bold">
+                  {companyProfile.companyName || "MAALVILA Car Rental Services"}
+                </div>
+                <div className="text-xs text-gray-600">
+                  {companyProfile.companyAddress || ""}
+                </div>
+                <div className="text-xs text-gray-600">
+                  {companyProfile.companyPhone || ""}{" "}
+                  {companyProfile.companyEmail ? `• ${companyProfile.companyEmail}` : ""}
+                </div>
+                <div className="text-xs text-gray-600">
+                  {companyProfile.companyTin ? `TIN: ${companyProfile.companyTin}` : ""}
+                  {companyProfile.vatNumber ? ` • VAT No: ${companyProfile.vatNumber}` : ""}
+                </div>
+              </div>
+
               <div className="text-sm text-gray-600">Invoice</div>
               <div className="text-xl font-bold">{invoiceNumber}</div>
 
@@ -1802,6 +2291,9 @@ export default function Dashboard() {
               </div>
               <div className="text-sm">
                 Driver: <b>{invoiceBooking.driver}</b>
+                {invoiceBooking.driverPhone ? (
+                  <span> • Driver Contact: <b>{invoiceBooking.driverPhone}</b></span>
+                ) : null}
               </div>
               {(invoiceBooking.travelFrom || invoiceBooking.travelTo) && (
                 <div className="text-sm">
@@ -1848,7 +2340,151 @@ export default function Dashboard() {
         </Card>
       )}
 
-      {/* AUDIT TRAIL */}
+              </>
+      )}
+
+      {/* SETTINGS */}
+      {activeView === "settings" && (
+        <Card className="rounded-2xl shadow">
+          <CardContent className="p-4 space-y-4">
+            <div className="flex items-center gap-2">
+              <Building2 className="w-5 h-5" />
+              <h2 className="text-lg font-semibold">Company Profile & Document Settings</h2>
+            </div>
+
+            <div className="grid md:grid-cols-2 gap-3">
+              <Input
+                placeholder="Company Name"
+                value={companyProfile.companyName || ""}
+                onChange={(e) =>
+                  setCompanyProfile((p) => ({ ...p, companyName: e.target.value }))
+                }
+              />
+
+              <Input
+                placeholder="Company Email"
+                value={companyProfile.companyEmail || ""}
+                onChange={(e) =>
+                  setCompanyProfile((p) => ({ ...p, companyEmail: e.target.value }))
+                }
+              />
+
+              <Input
+                placeholder="Company Phone"
+                value={companyProfile.companyPhone || ""}
+                onChange={(e) =>
+                  setCompanyProfile((p) => ({ ...p, companyPhone: e.target.value }))
+                }
+              />
+
+              <Input
+                placeholder="Company Address"
+                value={companyProfile.companyAddress || ""}
+                onChange={(e) =>
+                  setCompanyProfile((p) => ({ ...p, companyAddress: e.target.value }))
+                }
+              />
+
+              <Input
+                placeholder="TIN"
+                value={companyProfile.companyTin || ""}
+                onChange={(e) =>
+                  setCompanyProfile((p) => ({ ...p, companyTin: e.target.value }))
+                }
+              />
+
+              <Input
+                placeholder="VAT Registration Number"
+                value={companyProfile.vatNumber || ""}
+                onChange={(e) =>
+                  setCompanyProfile((p) => ({ ...p, vatNumber: e.target.value }))
+                }
+              />
+
+              <Input
+                placeholder="Logo URL"
+                value={companyProfile.logoUrl || ""}
+                onChange={(e) =>
+                  setCompanyProfile((p) => ({ ...p, logoUrl: e.target.value }))
+                }
+              />
+
+              <Input
+                placeholder="Letterhead URL"
+                value={companyProfile.letterheadUrl || ""}
+                onChange={(e) =>
+                  setCompanyProfile((p) => ({ ...p, letterheadUrl: e.target.value }))
+                }
+              />
+
+              <select
+                className="border rounded-lg p-2 text-sm h-10"
+                value={companyProfile.vatEnabled ? "yes" : "no"}
+                onChange={(e) =>
+                  setCompanyProfile((p) => ({
+                    ...p,
+                    vatEnabled: e.target.value === "yes",
+                  }))
+                }
+              >
+                <option value="yes">VAT Enabled</option>
+                <option value="no">VAT Disabled</option>
+              </select>
+
+              <select
+                className="border rounded-lg p-2 text-sm h-10"
+                value={companyProfile.vatMode || "exclusive"}
+                onChange={(e) =>
+                  setCompanyProfile((p) => ({ ...p, vatMode: e.target.value }))
+                }
+              >
+                <option value="exclusive">VAT Exclusive Pricing</option>
+                <option value="inclusive">VAT Inclusive Pricing (later)</option>
+              </select>
+            </div>
+
+            <div className="grid gap-3">
+              <Input
+                placeholder="Quotation Terms"
+                value={companyProfile.quotationTerms || ""}
+                onChange={(e) =>
+                  setCompanyProfile((p) => ({ ...p, quotationTerms: e.target.value }))
+                }
+              />
+
+              <Input
+                placeholder="Invoice Footer"
+                value={companyProfile.invoiceFooter || ""}
+                onChange={(e) =>
+                  setCompanyProfile((p) => ({ ...p, invoiceFooter: e.target.value }))
+                }
+              />
+
+              <Input
+                placeholder="Receipt Footer"
+                value={companyProfile.receiptFooter || ""}
+                onChange={(e) =>
+                  setCompanyProfile((p) => ({ ...p, receiptFooter: e.target.value }))
+                }
+              />
+            </div>
+
+            <div className="rounded-xl border bg-white p-3 text-sm text-gray-600">
+              Ghana VAT-ready format: VAT 15%, NHIL 2.5%, GETFund 2.5%.
+              If MAALVILA is required to issue certified e-VAT invoices, this document format
+              may later need integration with a GRA-certified invoicing system.
+            </div>
+
+            <Button onClick={saveCompanyProfile} disabled={savingProfile}>
+              {savingProfile ? "Saving..." : "Save Company Settings"}
+            </Button>
+          </CardContent>
+        </Card>
+      )}
+
+      {activeView === "audit" && (
+        <>
+{/* AUDIT TRAIL */}
       <Card className="rounded-2xl">
         <CardContent className="p-4">
           <h2 className="text-lg font-semibold mb-3">Audit Trail</h2>
@@ -1878,7 +2514,8 @@ export default function Dashboard() {
             )}
           </div>
         </CardContent>
-      </Card>
+      </Card>        </>
+      )}
     </div>
   );
 }
