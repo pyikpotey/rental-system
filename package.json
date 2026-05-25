@@ -3,9 +3,11 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
-    "dev": "next dev",
-    "tunnel": "concurrently \"next dev -H 0.0.0.0\" \"ngrok http 3000\""
-  },
+  "dev": "next dev",
+  "build": "next build",
+  "start": "next start",
+  "tunnel": "concurrently \"next dev -H 0.0.0.0\" \"ngrok http 3000\""
+},
   "dependencies": {
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
