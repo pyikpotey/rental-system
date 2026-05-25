@@ -114,6 +114,21 @@ function normalizeSelectedDates(raw) {
 function sameDay(a, b) {
   return a instanceof Date && b instanceof Date && a.getFullYear() === b.getFullYear() && a.getMonth() === b.getMonth() && a.getDate() === b.getDate();
 }
+// phase3u-audit-vatmodes-firestore-fix
+// phase3u-b-vatmodes-internal-set-fix
+function sanitizeForFirestore(value) {
+  if (value instanceof Set) return Array.from(value);
+  if (Array.isArray(value)) return value.map((item) => sanitizeForFirestore(item));
+  if (value && typeof value === "object") {
+    if (value instanceof Date) return value;
+    const cleaned = {};
+    Object.entries(value).forEach(([key, val]) => {
+      cleaned[key] = sanitizeForFirestore(val);
+    });
+    return cleaned;
+  }
+  return value;
+}
 function currencyGH(amount) {
   const n = Number(amount || 0);
   try {
@@ -1641,7 +1656,7 @@ export default function Dashboard() {
       });
     }
 
-    await addDoc(collection(db, "audit"), {
+    await addDoc(collection(db, "audit"), sanitizeForFirestore({
       action: `Trip closeout captured: ${row.carName} (${row.carNumber}) for ${row.customer} - ${covered.toLocaleString()} km; fuel treatment: ${row.fuelBillingMode || "client_paid_direct"}`,
       userId: user?.email || roleEmail || "",
       uid: user?.uid || "",
@@ -1649,7 +1664,7 @@ export default function Dashboard() {
       bookingId: row.bookingId,
       carNumber: row.carNumber,
       kmCovered: covered,
-    });
+    }));
 
     setTripCloseoutDrafts((prev) => {
       const next = { ...prev };
@@ -1921,7 +1936,7 @@ export default function Dashboard() {
       maintenanceUpdatedBy: user?.uid || "",
       maintenanceUpdatedByEmail: user?.email || roleEmail || "",
     });
-    await addDoc(collection(db, "audit"), { action: `Maintenance updated: ${car.name || "Vehicle"} (${car.number || "No number"})`, userId: user?.email || roleEmail || "", uid: user?.uid || "", time: serverTimestamp(), carId: car.id, carNumber: car.number || "" });
+    await addDoc(collection(db, "audit"), sanitizeForFirestore({ action: `Maintenance updated: ${car.name || "Vehicle"} (${car.number || "No number"})`, userId: user?.email || roleEmail || "", uid: user?.uid || "", time: serverTimestamp(), carId: car.id, carNumber: car.number || "" }));
     setMaintenanceDrafts((prev) => {
       const next = { ...prev };
       delete next[car.id];
@@ -2001,7 +2016,7 @@ export default function Dashboard() {
     setSavingProfile(true);
     try {
       await setDoc(doc(db, "settings", "companyProfile"), { ...companyProfile, updatedAt: serverTimestamp(), updatedBy: user?.uid || "", updatedByEmail: user?.email || roleEmail || "" });
-      await addDoc(collection(db, "audit"), { action: "Company profile/settings updated", userId: user?.email || roleEmail || "", uid: user?.uid || "", time: serverTimestamp() });
+      await addDoc(collection(db, "audit"), sanitizeForFirestore({ action: "Company profile/settings updated", userId: user?.email || roleEmail || "", uid: user?.uid || "", time: serverTimestamp() }));
       alert("Company profile saved successfully.");
     } catch (e) {
       console.error(e);
@@ -2015,7 +2030,7 @@ export default function Dashboard() {
     if (!newSourceName.trim()) return alert("Enter source name.");
     if (sources.some((s) => String(s.sourceName || "").toLowerCase() === newSourceName.trim().toLowerCase())) return alert("This source already exists.");
     await addDoc(collection(db, "sources"), { sourceName: newSourceName.trim(), sourceType: newSourceType, contactPerson: newSourceContactPerson.trim(), phone: newSourcePhone.trim(), email: newSourceEmail.trim(), address: newSourceAddress.trim(), active: true, createdAt: serverTimestamp(), createdBy: user?.uid || "", createdByEmail: user?.email || roleEmail || "" });
-    await addDoc(collection(db, "audit"), { action: `Source added: ${newSourceName.trim()} (${sourceTypeLabel(newSourceType)})`, userId: user?.email || roleEmail || "", uid: user?.uid || "", time: serverTimestamp() });
+    await addDoc(collection(db, "audit"), sanitizeForFirestore({ action: `Source added: ${newSourceName.trim()} (${sourceTypeLabel(newSourceType)})`, userId: user?.email || roleEmail || "", uid: user?.uid || "", time: serverTimestamp() }));
     setNewSourceName(""); setNewSourceType("main"); setNewSourceContactPerson(""); setNewSourcePhone(""); setNewSourceEmail(""); setNewSourceAddress("");
   };
   const addCar = async () => {
@@ -2027,7 +2042,7 @@ export default function Dashboard() {
     if (cars.some((c) => normalizeCarNumber(c.number) === cleanedCarNumber)) return alert(`Duplicate car number is not allowed: ${cleanedCarNumber}. Check Cars List before adding.`);
     const s = sources.find((x) => x.id === newCarSourceId);
     await addDoc(collection(db, "cars"), { name: newCarName.trim(), number: cleanedCarNumber, sourceId: s?.id || "", sourceName: s?.sourceName || "", sourceType: s?.sourceType || "main", createdAt: serverTimestamp(), createdBy: user?.uid || "", createdByEmail: user?.email || "" });
-    await addDoc(collection(db, "audit"), { action: `Car added: ${newCarName.trim()} (${cleanedCarNumber}) — Source: ${s?.sourceName || "Unknown"}`, userId: user?.email || roleEmail || "", uid: user?.uid || "", time: serverTimestamp() });
+    await addDoc(collection(db, "audit"), sanitizeForFirestore({ action: `Car added: ${newCarName.trim()} (${cleanedCarNumber}) — Source: ${s?.sourceName || "Unknown"}`, userId: user?.email || roleEmail || "", uid: user?.uid || "", time: serverTimestamp() }));
     setNewCarName(""); setNewCarNumber(""); setNewCarSourceId("");
   };
   const resetBookingForm = () => {
@@ -2148,7 +2163,7 @@ export default function Dashboard() {
         paymentUpdatedAt: current.paymentUpdatedAt || null,
         updatedAt: serverTimestamp(),
       });
-      await addDoc(collection(db, "audit"), { action: `Multi-car booking updated for ${bookingData.customer} — Vehicles: ${computedItems.length} — Client net ${currencyGH(pricingTotals.totalNetClientAmount)}`, userId: user?.email || roleEmail || "", uid: user?.uid || "", time: serverTimestamp() });
+      await addDoc(collection(db, "audit"), sanitizeForFirestore({ action: `Multi-car booking updated for ${bookingData.customer} — Vehicles: ${computedItems.length} — Client net ${currencyGH(pricingTotals.totalNetClientAmount)}`, userId: user?.email || roleEmail || "", uid: user?.uid || "", time: serverTimestamp() }));
     } else {
       await addDoc(collection(db, "bookings"), {
         ...bookingData,
@@ -2159,7 +2174,7 @@ export default function Dashboard() {
         paymentStatus: "unpaid",
         createdAt: serverTimestamp(),
       });
-      await addDoc(collection(db, "audit"), { action: `Multi-car booking created for ${bookingData.customer} — Vehicles: ${computedItems.length} — Client net ${currencyGH(pricingTotals.totalNetClientAmount)}`, userId: user?.email || roleEmail || "", uid: user?.uid || "", time: serverTimestamp() });
+      await addDoc(collection(db, "audit"), sanitizeForFirestore({ action: `Multi-car booking created for ${bookingData.customer} — Vehicles: ${computedItems.length} — Client net ${currencyGH(pricingTotals.totalNetClientAmount)}`, userId: user?.email || roleEmail || "", uid: user?.uid || "", time: serverTimestamp() }));
     }
     resetBookingForm();
   };
@@ -2175,7 +2190,7 @@ export default function Dashboard() {
     const totals = getBookingTotals(b, cars);
     const amt = totals.totalNetClientAmount;
     await updateDoc(doc(db, "bookings", b.id), { status: "confirmed", confirmedAmount: amt, penalty: 0, pricingTotals: totals, updatedAt: serverTimestamp() });
-    await addDoc(collection(db, "audit"), { action: `Booking confirmed (${b.customer}) — Vehicles: ${getBookingItems(b, cars).length} — Amount ${currencyGH(amt)}`, userId: user?.email || roleEmail || "", uid: user?.uid || "", time: serverTimestamp() });
+    await addDoc(collection(db, "audit"), sanitizeForFirestore({ action: `Booking confirmed (${b.customer}) — Vehicles: ${getBookingItems(b, cars).length} — Amount ${currencyGH(amt)}`, userId: user?.email || roleEmail || "", uid: user?.uid || "", time: serverTimestamp() }));
     await sendEmailNotification({ toEmail: b.customerEmail, bookingId: b.id, actionType: "booking_confirmed", subject: `Booking Confirmed - ${b.customer || "Customer"}`, message: `Hello ${b.customer || "Customer"},\n\nYour booking is CONFIRMED.\n\nVehicles: ${getBookingItems(b, cars).length}\nRoutes: ${Array.from(new Set(getBookingItems(b, cars).map((i) => `${i.travelFrom || "—"} → ${i.travelTo || "—"}`))).join(" | ")}\nDates: ${computeBookingDateSummary(getBookingItems(b, cars)).map(toISODateString).join(", ")}\nClient Net: ${currencyGH(amt)}\n\nThank you.` });
   };
   const cancelBooking = async (b) => {
@@ -2183,7 +2198,7 @@ export default function Dashboard() {
     const base = getBookingTotals(b, cars).totalNetClientAmount;
     const penalty = b.status === "confirmed" ? base * 0.05 : 0;
     await updateDoc(doc(db, "bookings", b.id), { status: "cancelled", penalty, updatedAt: serverTimestamp() });
-    await addDoc(collection(db, "audit"), { action: `Booking cancelled (${b.customer})${penalty ? ` — Penalty ${currencyGH(penalty)}` : ""}`, userId: user?.email || roleEmail || "", uid: user?.uid || "", time: serverTimestamp() });
+    await addDoc(collection(db, "audit"), sanitizeForFirestore({ action: `Booking cancelled (${b.customer})${penalty ? ` — Penalty ${currencyGH(penalty)}` : ""}`, userId: user?.email || roleEmail || "", uid: user?.uid || "", time: serverTimestamp() }));
   };
   const exportCSV = () => {
     if (!can(role, "export")) return alert("You do not have permission to export.");
@@ -2299,7 +2314,7 @@ export default function Dashboard() {
     if (!quotationBooking) return;
     const totals = getBookingTotals(quotationBooking, cars);
     const vat = getBookingVatSummary(quotationBooking, cars);
-    await addDoc(collection(db, "audit"), { action: `Quotation generated (${quotationNumber}) for ${quotationBooking.customer} — Vehicles ${getBookingItems(quotationBooking, cars).length} — Total ${currencyGH(vat.grandTotal)}`, userId: user?.email || roleEmail || "", uid: user?.uid || "", time: serverTimestamp(), quotationNumber, bookingId: quotationBooking.id, documentType: "quotation", vatSummary: vat });
+    await addDoc(collection(db, "audit"), sanitizeForFirestore({ action: `Quotation generated (${quotationNumber}) for ${quotationBooking.customer} — Vehicles ${getBookingItems(quotationBooking, cars).length} — Total ${currencyGH(vat.grandTotal)}`, userId: user?.email || roleEmail || "", uid: user?.uid || "", time: serverTimestamp(), quotationNumber, bookingId: quotationBooking.id, documentType: "quotation", vatSummary: vat }));
     await sendEmailNotification({ toEmail: quotationBooking.customerEmail, bookingId: quotationBooking.id, actionType: "quotation_generated", subject: `Quotation ${quotationNumber} - ${quotationBooking.customer || "Customer"}`, message: `${companyProfile.companyName || "MAALVILA Car Rental Services"}\nQUOTATION\nQuotation No: ${quotationNumber}\nCustomer: ${quotationBooking.customer || ""}\nVehicles: ${getBookingItems(quotationBooking, cars).length}\nRoutes: ${Array.from(new Set(getBookingItems(quotationBooking, cars).map((i) => `${i.travelFrom || "—"} → ${i.travelTo || "—"}`))).join(" | ")}\nDates: ${computeBookingDateSummary(getBookingItems(quotationBooking, cars)).map(toISODateString).join(", ")}\nSubtotal: ${currencyGH(vat.subtotal)}\nDiscount: ${currencyGH(vat.discount)}\nTaxable Amount: ${currencyGH(vat.taxableAmount)}\nVAT @ 15%: ${currencyGH(vat.vat)}\nNHIL @ 2.5%: ${currencyGH(vat.nhil)}\nGETFund @ 2.5%: ${currencyGH(vat.getfund)}\nGrand Total: ${currencyGH(vat.grandTotal)}\n\n${quotationNotes || companyProfile.quotationTerms || ""}` });
     setQuotationOpen(false);
   };
@@ -2307,7 +2322,7 @@ export default function Dashboard() {
     if (!invoiceBooking) return;
     const totals = getBookingTotals(invoiceBooking, cars);
     const vat = getBookingVatSummary(invoiceBooking, cars);
-    await addDoc(collection(db, "audit"), { action: `Invoice generated (${invoiceNumber}) for ${invoiceBooking.customer} — Vehicles ${getBookingItems(invoiceBooking, cars).length} — Total ${currencyGH(vat.grandTotal)}`, userId: user?.email || roleEmail || "", uid: user?.uid || "", time: serverTimestamp(), invoiceNumber, bookingId: invoiceBooking.id, documentType: "invoice", vatSummary: vat });
+    await addDoc(collection(db, "audit"), sanitizeForFirestore({ action: `Invoice generated (${invoiceNumber}) for ${invoiceBooking.customer} — Vehicles ${getBookingItems(invoiceBooking, cars).length} — Total ${currencyGH(vat.grandTotal)}`, userId: user?.email || roleEmail || "", uid: user?.uid || "", time: serverTimestamp(), invoiceNumber, bookingId: invoiceBooking.id, documentType: "invoice", vatSummary: vat }));
     await sendEmailNotification({ toEmail: invoiceBooking.customerEmail, bookingId: invoiceBooking.id, actionType: "invoice_generated", subject: `Invoice ${invoiceNumber} - ${invoiceBooking.customer || "Customer"}`, message: `${companyProfile.companyName || "MAALVILA Car Rental Services"}\nINVOICE\nInvoice No: ${invoiceNumber}\nCustomer: ${invoiceBooking.customer || ""}\nVehicles: ${getBookingItems(invoiceBooking, cars).length}\nSubtotal: ${currencyGH(vat.subtotal)}\nDiscount: ${currencyGH(vat.discount)}\nVAT @ 15%: ${currencyGH(vat.vat)}\nNHIL @ 2.5%: ${currencyGH(vat.nhil)}\nGETFund @ 2.5%: ${currencyGH(vat.getfund)}\nGrand Total: ${currencyGH(vat.grandTotal)}\n\n${invoiceNotes || companyProfile.invoiceFooter || ""}` });
     setInvoiceOpen(false);
   };
@@ -2317,7 +2332,7 @@ export default function Dashboard() {
     const vat = getBookingVatSummary(receiptBooking, cars);
     const paid = clampMoney(receiptBooking.amountPaid || 0);
     const balance = Math.max(0, vat.grandTotal - paid);
-    await addDoc(collection(db, "audit"), { action: `Receipt generated (${receiptNumber}) for ${receiptBooking.customer} — Paid ${currencyGH(paid)} — Balance ${currencyGH(balance)}`, userId: user?.email || roleEmail || "", uid: user?.uid || "", time: serverTimestamp(), receiptNumber, bookingId: receiptBooking.id, documentType: "receipt", vatSummary: vat, amountPaid: paid, balance });
+    await addDoc(collection(db, "audit"), sanitizeForFirestore({ action: `Receipt generated (${receiptNumber}) for ${receiptBooking.customer} — Paid ${currencyGH(paid)} — Balance ${currencyGH(balance)}`, userId: user?.email || roleEmail || "", uid: user?.uid || "", time: serverTimestamp(), receiptNumber, bookingId: receiptBooking.id, documentType: "receipt", vatSummary: vat, amountPaid: paid, balance }));
     await sendEmailNotification({ toEmail: receiptBooking.customerEmail, bookingId: receiptBooking.id, actionType: "receipt_generated", subject: `Receipt ${receiptNumber} - ${receiptBooking.customer || "Customer"}`, message: `${companyProfile.companyName || "MAALVILA Car Rental Services"}\nRECEIPT\nReceipt No: ${receiptNumber}\nCustomer: ${receiptBooking.customer || ""}\nVehicles: ${getBookingItems(receiptBooking, cars).length}\nAmount Received to Date: ${currencyGH(paid)}\nOutstanding Balance: ${currencyGH(balance)}\n\n${receiptNotes || companyProfile.receiptFooter || ""}` });
     setReceiptOpen(false);
   };
@@ -2326,7 +2341,7 @@ export default function Dashboard() {
     const source = sources.find((s) => s.id === supplierRequestSourceId);
     const items = getBookingItems(supplierRequestBooking, cars).filter((i) => i.sourceId === supplierRequestSourceId);
     const dates = computeBookingDateSummary(items).map(toISODateString).join(", ");
-    await addDoc(collection(db, "audit"), { action: `Supplier request generated (${supplierRequestNumber}) for ${source?.sourceName || "Supplier"} — Vehicles ${items.length}`, userId: user?.email || roleEmail || "", uid: user?.uid || "", time: serverTimestamp(), supplierRequestNumber, bookingId: supplierRequestBooking.id, sourceId: supplierRequestSourceId, documentType: "supplier_request" });
+    await addDoc(collection(db, "audit"), sanitizeForFirestore({ action: `Supplier request generated (${supplierRequestNumber}) for ${source?.sourceName || "Supplier"} — Vehicles ${items.length}`, userId: user?.email || roleEmail || "", uid: user?.uid || "", time: serverTimestamp(), supplierRequestNumber, bookingId: supplierRequestBooking.id, sourceId: supplierRequestSourceId, documentType: "supplier_request" }));
     await sendEmailNotification({ toEmail: source?.email || "", bookingId: supplierRequestBooking.id, actionType: "supplier_request_generated", subject: `Vehicle Request ${supplierRequestNumber} - ${companyProfile.companyName || "MAALVILA"}`, message: `${companyProfile.companyName || "MAALVILA Car Rental Services"}\nSUPPLIER VEHICLE REQUEST\nRequest No: ${supplierRequestNumber}\nSupplier: ${source?.sourceName || ""}\nClient: ${supplierRequestBooking.customer || ""}\nNumber of vehicles requested: ${items.length}\nDates: ${dates}\nRoutes: ${Array.from(new Set(items.map((i) => `${i.travelFrom || "—"} → ${i.travelTo || "—"}`))).join(" | ")}\n\nPlease respond with vehicle model, registration number, driver name, driver contact, confirmed rate and any operational notes.\n\n${supplierRequestNotes || ""}` });
     alert("Supplier request saved to Audit Trail and email attempted if supplier email exists.");
     setSupplierRequestOpen(false);
@@ -2361,7 +2376,7 @@ export default function Dashboard() {
       supplierResponseUpdatedBy: user?.email || roleEmail || "",
       updatedAt: serverTimestamp(),
     });
-    await addDoc(collection(db, "audit"), {
+    await addDoc(collection(db, "audit"), sanitizeForFirestore({
       action: `Supplier response captured (${supplierResponseNumber}) for ${source?.sourceName || "Supplier"} — Vehicles ${supplierResponseLines.length}`,
       userId: user?.email || roleEmail || "",
       uid: user?.uid || "",
@@ -2371,7 +2386,7 @@ export default function Dashboard() {
       sourceId: supplierResponseSourceId,
       documentType: "supplier_response",
       responseLines: supplierResponseLines,
-    });
+    }));
     alert("Supplier response saved to booking and Audit Trail.");
     setSupplierResponseOpen(false);
   };
@@ -2380,7 +2395,7 @@ export default function Dashboard() {
     const source = sources.find((s) => s.id === supplierStatementSourceId);
     const items = getBookingItems(supplierStatementBooking, cars).filter((i) => i.sourceId === supplierStatementSourceId);
     const totals = computePricingTotals(items);
-    await addDoc(collection(db, "audit"), { action: `Supplier statement generated (${supplierStatementNumber}) for ${source?.sourceName || "Supplier"} — Net payable ${currencyGH(totals.totalNetSupplierPayable)}`, userId: user?.email || roleEmail || "", uid: user?.uid || "", time: serverTimestamp(), supplierStatementNumber, bookingId: supplierStatementBooking.id, sourceId: supplierStatementSourceId, documentType: "supplier_statement", supplierTotals: totals });
+    await addDoc(collection(db, "audit"), sanitizeForFirestore({ action: `Supplier statement generated (${supplierStatementNumber}) for ${source?.sourceName || "Supplier"} — Net payable ${currencyGH(totals.totalNetSupplierPayable)}`, userId: user?.email || roleEmail || "", uid: user?.uid || "", time: serverTimestamp(), supplierStatementNumber, bookingId: supplierStatementBooking.id, sourceId: supplierStatementSourceId, documentType: "supplier_statement", supplierTotals: totals }));
     alert("Supplier statement saved to Audit Trail.");
   };
 
@@ -2391,7 +2406,7 @@ export default function Dashboard() {
     const totals = computePricingTotals(items);
     const sourcePayments = supplierPaymentHistory.filter((p) => String(p.sourceId || "") === String(supplierVoucherSourceId)).reduce((sum, p) => sum + clampMoney(p.amount), 0);
     const balance = Math.max(0, totals.totalNetSupplierPayable - sourcePayments);
-    await addDoc(collection(db, "audit"), { action: `Supplier settlement voucher generated (${supplierVoucherNumber}) for ${source?.sourceName || "Supplier"} — Balance ${currencyGH(balance)}`, userId: user?.email || roleEmail || "", uid: user?.uid || "", time: serverTimestamp(), supplierVoucherNumber, bookingId: supplierVoucherBooking.id, sourceId: supplierVoucherSourceId, documentType: "supplier_settlement_voucher", supplierTotals: totals, supplierPaidToDate: sourcePayments, supplierBalance: balance });
+    await addDoc(collection(db, "audit"), sanitizeForFirestore({ action: `Supplier settlement voucher generated (${supplierVoucherNumber}) for ${source?.sourceName || "Supplier"} — Balance ${currencyGH(balance)}`, userId: user?.email || roleEmail || "", uid: user?.uid || "", time: serverTimestamp(), supplierVoucherNumber, bookingId: supplierVoucherBooking.id, sourceId: supplierVoucherSourceId, documentType: "supplier_settlement_voucher", supplierTotals: totals, supplierPaidToDate: sourcePayments, supplierBalance: balance }));
     alert("Supplier settlement voucher saved to Audit Trail.");
   };
 
@@ -2418,7 +2433,7 @@ export default function Dashboard() {
     const source = sources.find((s) => s.id === supplierPaymentSourceId);
     await addDoc(collection(db, "bookings", supplierPaymentBooking.id, "supplierPayments"), { sourceId: supplierPaymentSourceId, sourceName: source?.sourceName || "", amount: amt, method: supplierPaymentMethod || "cash", reference: (supplierPaymentReference || "").trim(), note: (supplierPaymentNote || "").trim(), paidAt: serverTimestamp(), recordedByEmail: user?.email || roleEmail || "", recordedByUid: user?.uid || "" });
     await updateDoc(doc(db, "bookings", supplierPaymentBooking.id), { supplierPaidTotal: increment(amt), supplierPaymentUpdatedAt: serverTimestamp(), updatedAt: serverTimestamp() });
-    await addDoc(collection(db, "audit"), { action: `Supplier payment recorded for ${source?.sourceName || "Supplier"} — ${currencyGH(amt)}`, userId: user?.email || roleEmail || "", uid: user?.uid || "", time: serverTimestamp(), bookingId: supplierPaymentBooking.id, sourceId: supplierPaymentSourceId, supplierPaymentAmount: amt, supplierPaymentMethod: supplierPaymentMethod || "cash", documentType: "supplier_payment" });
+    await addDoc(collection(db, "audit"), sanitizeForFirestore({ action: `Supplier payment recorded for ${source?.sourceName || "Supplier"} — ${currencyGH(amt)}`, userId: user?.email || roleEmail || "", uid: user?.uid || "", time: serverTimestamp(), bookingId: supplierPaymentBooking.id, sourceId: supplierPaymentSourceId, supplierPaymentAmount: amt, supplierPaymentMethod: supplierPaymentMethod || "cash", documentType: "supplier_payment" }));
     setSupplierPaymentOpen(false);
   };
   const recordPayment = async () => {
@@ -2430,7 +2445,7 @@ export default function Dashboard() {
     const newStatus = computePaymentStatus(total, newPaid);
     await addDoc(collection(db, "bookings", paymentBooking.id, "payments"), { amount: amt, method: paymentMethod || "cash", reference: (paymentReference || "").trim(), note: (paymentNote || "").trim(), paidAt: serverTimestamp(), recordedByEmail: user?.email || roleEmail || "", recordedByUid: user?.uid || "" });
     await updateDoc(doc(db, "bookings", paymentBooking.id), { amountPaid: increment(amt), paymentStatus: newStatus, paymentUpdatedAt: serverTimestamp(), updatedAt: serverTimestamp() });
-    await addDoc(collection(db, "audit"), { action: `Payment recorded for ${paymentBooking.customer} — ${currencyGH(amt)} — Status: ${newStatus}`, userId: user?.email || roleEmail || "", uid: user?.uid || "", time: serverTimestamp(), bookingId: paymentBooking.id, paymentAmount: amt, paymentMethod: paymentMethod || "cash" });
+    await addDoc(collection(db, "audit"), sanitizeForFirestore({ action: `Payment recorded for ${paymentBooking.customer} — ${currencyGH(amt)} — Status: ${newStatus}`, userId: user?.email || roleEmail || "", uid: user?.uid || "", time: serverTimestamp(), bookingId: paymentBooking.id, paymentAmount: amt, paymentMethod: paymentMethod || "cash" }));
     setPaymentOpen(false);
   };
 
@@ -2460,12 +2475,14 @@ export default function Dashboard() {
     const items = getBookingItems(booking, cars);
     const totals = getBookingTotals(booking, cars);
     const vat = getBookingVatSummary(booking, cars);
-    return <div className="print-document border rounded-xl p-4 bg-white space-y-3"><style>{`@media print { body * { visibility: hidden !important; } .print-document, .print-document * { visibility: visible !important; } .print-document { position: absolute !important; left: 0 !important; top: 0 !important; width: 100% !important; box-shadow: none !important; border: none !important; } .no-print, .no-print * { display: none !important; visibility: hidden !important; } @page { margin: 12mm; } }`}</style>{renderDocumentPrintControls("Document Preview")}{renderBrandHeader()}<div className="border-t pt-3"><div className="text-sm text-gray-600">{type}</div><div className="text-lg font-bold">{number}</div></div><div className="grid md:grid-cols-2 gap-2 text-sm"><div>Customer: <b>{booking.customer}</b></div><div>Email: <b>{booking.customerEmail || "—"}</b></div><div className="md:col-span-2">Routes Summary: <b>{Array.from(new Set(items.map((i) => `${i.travelFrom || "—"} → ${i.travelTo || "—"}`))).join(" | ")}</b></div><div className="md:col-span-2">Booking Dates Summary: <b>{computeBookingDateSummary(items).map(toISODateString).join(", ")}</b></div></div><div className="overflow-auto"><table className="w-full text-xs border"><thead><tr className="bg-slate-50 text-left"><th className="p-2">Car</th><th className="p-2">Car No.</th><th className="p-2">Route</th><th className="p-2">Driver</th><th className="p-2">Dates</th><th className="p-2 text-right">Days</th><th className="p-2 text-right">Daily Rate</th><th className="p-2 text-right">Gross</th><th className="p-2 text-right">Discount</th><th className="p-2">VAT Treatment</th><th className="p-2 text-right">Tax</th><th className="p-2 text-right">Grand Total</th></tr></thead><tbody>{items.map((i) => <tr key={i.itemId} className="border-t"><td className="p-2">{i.carName}</td><td className="p-2">{i.carNumber}</td><td className="p-2">{i.travelFrom || "—"} → {i.travelTo || "—"}</td><td className="p-2">{i.driver || "—"}{i.driverPhone ? ` (${i.driverPhone})` : ""}</td><td className="p-2">{normalizeSelectedDates(i.selectedDates).map(toISODateString).join(", ")}</td><td className="p-2 text-right">{i.days}</td><td className="p-2 text-right">{currencyGH(i.clientDailyRate)}</td><td className="p-2 text-right">{currencyGH(i.grossClientAmount)}</td><td className="p-2 text-right">{currencyGH(i.discountAmount)}</td><td className="p-2">{clientVatModeLabel(i.clientVatMode)}</td><td className="p-2 text-right">{currencyGH(i.taxAmount)}</td><td className="p-2 text-right font-medium">{currencyGH(i.clientGrandTotal)}</td></tr>)}</tbody></table></div><div className="border-t pt-3 text-sm space-y-1">{[["Subtotal", vat.subtotal], ["Discount", vat.discount], ["Taxable Amount", vat.taxableAmount], ["VAT @ 15%", vat.vat], ["NHIL @ 2.5%", vat.nhil], ["GETFund @ 2.5%", vat.getfund]].map(([label, val]) => <div key={label} className="flex justify-between"><span>{label}</span><b>{currencyGH(val)}</b></div>)}<div className="flex justify-between border-t pt-2 text-base"><span>Grand Total</span><b>{currencyGH(vat.grandTotal)}</b></div><div className="flex justify-between text-xs text-gray-600"><span>VAT Treatment</span><b>{vat.vatModesText || "Mixed per vehicle line"}</b></div></div>{notes ? <div className="text-xs text-gray-600 border-t pt-2">{notes}</div> : null}</div>;
+    return <div className="print-document border rounded-xl p-4 bg-white space-y-3"><style>{`@media print { body * { visibility: hidden !important; } .print-document, .print-document * { visibility: visible !important; } .print-document { position: absolute !important; left: 0 !important; top: 0 !important; width: 100% !important; box-shadow: none !important; border: none !important; } .no-print, .no-print * { display: none !important; visibility: hidden !important; } @page { margin: 12mm; } }`}</style>{renderDocumentPrintControls("Document Preview")}{renderBrandHeader()}
+      {renderBankDetailsBox()}<div className="border-t pt-3"><div className="text-sm text-gray-600">{type}</div><div className="text-lg font-bold">{number}</div></div><div className="grid md:grid-cols-2 gap-2 text-sm"><div>Customer: <b>{booking.customer}</b></div><div>Email: <b>{booking.customerEmail || "—"}</b></div><div className="md:col-span-2">Routes Summary: <b>{Array.from(new Set(items.map((i) => `${i.travelFrom || "—"} → ${i.travelTo || "—"}`))).join(" | ")}</b></div><div className="md:col-span-2">Booking Dates Summary: <b>{computeBookingDateSummary(items).map(toISODateString).join(", ")}</b></div></div><div className="overflow-auto"><table className="w-full text-xs border"><thead><tr className="bg-slate-50 text-left"><th className="p-2">Car</th><th className="p-2">Car No.</th><th className="p-2">Route</th><th className="p-2">Driver</th><th className="p-2">Dates</th><th className="p-2 text-right">Days</th><th className="p-2 text-right">Daily Rate</th><th className="p-2 text-right">Gross</th><th className="p-2 text-right">Discount</th><th className="p-2">VAT Treatment</th><th className="p-2 text-right">Tax</th><th className="p-2 text-right">Grand Total</th></tr></thead><tbody>{items.map((i) => <tr key={i.itemId} className="border-t"><td className="p-2">{i.carName}</td><td className="p-2">{i.carNumber}</td><td className="p-2">{i.travelFrom || "—"} → {i.travelTo || "—"}</td><td className="p-2">{i.driver || "—"}{i.driverPhone ? ` (${i.driverPhone})` : ""}</td><td className="p-2">{normalizeSelectedDates(i.selectedDates).map(toISODateString).join(", ")}</td><td className="p-2 text-right">{i.days}</td><td className="p-2 text-right">{currencyGH(i.clientDailyRate)}</td><td className="p-2 text-right">{currencyGH(i.grossClientAmount)}</td><td className="p-2 text-right">{currencyGH(i.discountAmount)}</td><td className="p-2">{clientVatModeLabel(i.clientVatMode)}</td><td className="p-2 text-right">{currencyGH(i.taxAmount)}</td><td className="p-2 text-right font-medium">{currencyGH(i.clientGrandTotal)}</td></tr>)}</tbody></table></div><div className="border-t pt-3 text-sm space-y-1">{[["Subtotal", vat.subtotal], ["Discount", vat.discount], ["Taxable Amount", vat.taxableAmount], ["VAT @ 15%", vat.vat], ["NHIL @ 2.5%", vat.nhil], ["GETFund @ 2.5%", vat.getfund]].map(([label, val]) => <div key={label} className="flex justify-between"><span>{label}</span><b>{currencyGH(val)}</b></div>)}<div className="flex justify-between border-t pt-2 text-base"><span>Grand Total</span><b>{currencyGH(vat.grandTotal)}</b></div><div className="flex justify-between text-xs text-gray-600"><span>VAT Treatment</span><b>{vat.vatModesText || "Mixed per vehicle line"}</b></div></div>{notes ? <div className="text-xs text-gray-600 border-t pt-2">{notes}</div> : null}</div>;
   };
   const SupplierRequestPreview = ({ booking, sourceId, number, notes = "" }) => {
     const source = sources.find((s) => s.id === sourceId);
     const items = getBookingItems(booking, cars).filter((i) => i.sourceId === sourceId);
-    return <div className="print-document border rounded-xl p-4 bg-white space-y-3"><style>{`@media print { body * { visibility: hidden !important; } .print-document, .print-document * { visibility: visible !important; } .print-document { position: absolute !important; left: 0 !important; top: 0 !important; width: 100% !important; box-shadow: none !important; border: none !important; } .no-print, .no-print * { display: none !important; visibility: hidden !important; } @page { margin: 12mm; } }`}</style>{renderDocumentPrintControls("Document Preview")}{renderBrandHeader()}<div className="border-t pt-3"><div className="text-sm text-gray-600">Supplier Vehicle Request</div><div className="text-lg font-bold">{number}</div></div><div className="grid md:grid-cols-2 gap-2 text-sm"><div>Supplier: <b>{source?.sourceName || "—"}</b></div><div>Email: <b>{source?.email || "—"}</b></div><div>Client: <b>{booking.customer}</b></div><div>Vehicles Requested: <b>{items.length}</b></div><div className="md:col-span-2">Routes: <b>{Array.from(new Set(items.map((i) => `${i.travelFrom || "—"} → ${i.travelTo || "—"}`))).join(" | ")}</b></div><div className="md:col-span-2">Dates: <b>{computeBookingDateSummary(items).map(toISODateString).join(", ")}</b></div></div><div className="overflow-auto"><table className="w-full text-xs border"><thead><tr className="bg-slate-50 text-left"><th className="p-2">Requested Car</th><th className="p-2">Route</th><th className="p-2">Dates</th><th className="p-2 text-right">Days</th><th className="p-2 text-right">Proposed Supplier Rate</th><th className="p-2">Supplier Response Required</th></tr></thead><tbody>{items.map((i) => <tr key={i.itemId} className="border-t"><td className="p-2">{i.carName} ({i.carNumber})</td><td className="p-2">{i.travelFrom || "—"} → {i.travelTo || "—"}</td><td className="p-2">{normalizeSelectedDates(i.selectedDates).map(toISODateString).join(", ")}</td><td className="p-2 text-right">{i.days}</td><td className="p-2 text-right">{currencyGH(i.supplierRate)}</td><td className="p-2">Vehicle model, registration number, driver name, driver contact, confirmed rate, notes</td></tr>)}</tbody></table></div><div className="text-sm border-t pt-2">{notes || "Kindly confirm availability and operational details for the requested vehicle(s)."}</div></div>;
+    return <div className="print-document border rounded-xl p-4 bg-white space-y-3"><style>{`@media print { body * { visibility: hidden !important; } .print-document, .print-document * { visibility: visible !important; } .print-document { position: absolute !important; left: 0 !important; top: 0 !important; width: 100% !important; box-shadow: none !important; border: none !important; } .no-print, .no-print * { display: none !important; visibility: hidden !important; } @page { margin: 12mm; } }`}</style>{renderDocumentPrintControls("Document Preview")}{renderBrandHeader()}
+      {renderBankDetailsBox()}<div className="border-t pt-3"><div className="text-sm text-gray-600">Supplier Vehicle Request</div><div className="text-lg font-bold">{number}</div></div><div className="grid md:grid-cols-2 gap-2 text-sm"><div>Supplier: <b>{source?.sourceName || "—"}</b></div><div>Email: <b>{source?.email || "—"}</b></div><div>Client: <b>{booking.customer}</b></div><div>Vehicles Requested: <b>{items.length}</b></div><div className="md:col-span-2">Routes: <b>{Array.from(new Set(items.map((i) => `${i.travelFrom || "—"} → ${i.travelTo || "—"}`))).join(" | ")}</b></div><div className="md:col-span-2">Dates: <b>{computeBookingDateSummary(items).map(toISODateString).join(", ")}</b></div></div><div className="overflow-auto"><table className="w-full text-xs border"><thead><tr className="bg-slate-50 text-left"><th className="p-2">Requested Car</th><th className="p-2">Route</th><th className="p-2">Dates</th><th className="p-2 text-right">Days</th><th className="p-2 text-right">Proposed Supplier Rate</th><th className="p-2">Supplier Response Required</th></tr></thead><tbody>{items.map((i) => <tr key={i.itemId} className="border-t"><td className="p-2">{i.carName} ({i.carNumber})</td><td className="p-2">{i.travelFrom || "—"} → {i.travelTo || "—"}</td><td className="p-2">{normalizeSelectedDates(i.selectedDates).map(toISODateString).join(", ")}</td><td className="p-2 text-right">{i.days}</td><td className="p-2 text-right">{currencyGH(i.supplierRate)}</td><td className="p-2">Vehicle model, registration number, driver name, driver contact, confirmed rate, notes</td></tr>)}</tbody></table></div><div className="text-sm border-t pt-2">{notes || "Kindly confirm availability and operational details for the requested vehicle(s)."}</div></div>;
   };
   const triggerDocumentPrint = (mode = "portrait") => {
     if (typeof window === "undefined") return;
@@ -2491,6 +2508,20 @@ export default function Dashboard() {
     window.print();
   };
 
+
+  const renderBankDetailsBox = () => (
+    <div className="phase3t-bank-details border rounded-xl bg-blue-50 border-blue-200 p-3 text-sm space-y-2">
+      <div className="font-semibold text-blue-900">Payment / Bank Details</div>
+      <div className="grid md:grid-cols-2 gap-x-4 gap-y-1 text-blue-950">
+        <div>Bank: <b>Stanbic</b></div>
+        <div>Account Name: <b>MAALVILA ENTERPRISE</b></div>
+        <div>Account Number: <b>9040009904993</b></div>
+        <div>Branch: <b>Takoradi</b></div>
+        <div>Account Type: <b>Savings</b></div>
+        <div className="md:col-span-2">Payment Reference: <b>Please quote invoice/booking number when making payment</b></div>
+      </div>
+    </div>
+  );
   const renderDocumentPrintControls = (label = "Document") => (
     <div className="phase3s-print-save-pdf no-print flex flex-wrap items-center justify-between gap-2 border-b pb-3 mb-3">
       <div>
