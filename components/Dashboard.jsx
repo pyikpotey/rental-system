@@ -55,7 +55,7 @@ import {
   orderBy,
   limit,
 } from "firebase/firestore";
-import { onAuthStateChanged, signOut } from "firebase/auth";
+import { onAuthStateChanged, signOut, signInWithEmailAndPassword } from "firebase/auth";
 
 const GHANA_VAT_RATE = 0.15;
 const GHANA_NHIL_RATE = 0.025;
@@ -294,15 +294,85 @@ function blankBookingItem() {
     discountType: "none",
     discountValue: "",
     clientVatMode: "",
+    weekendBillingMode: "include_all",
+    selectedWeekendDates: [],
     supplierDiscountSharePct: 50,
     adminDiscountSharePct: 50,
   };
 }
+/* phase3v-c-line-based-booking-options */
+function isWeekendDate(value) {
+  const d = toDateSafe(value);
+  if (!d) return false;
+  const day = d.getDay();
+  return day === 0 || day === 6;
+}
+
+function normalizeSelectedWeekendDates(raw) {
+  if (Array.isArray(raw)) return normalizeSelectedDates(raw).map(toISODateString).filter(Boolean);
+  return String(raw || "")
+    .split(/[,;|\n]+/)
+    .map((x) => x.trim())
+    .filter(Boolean)
+    .map((x) => toDateSafe(x))
+    .filter(Boolean)
+    .map(toISODateString)
+    .filter(Boolean);
+}
+
+function applyWeekendBillingModeToDates(dates, weekendBillingMode = "include_all", selectedWeekendDates = []) {
+  const normalizedDates = normalizeSelectedDates(dates);
+  const mode = weekendBillingMode || "include_all";
+
+  if (mode === "exclude_all") {
+    return normalizedDates.filter((d) => !isWeekendDate(d));
+  }
+
+  if (mode === "selected_only") {
+    const selectedSet = new Set(normalizeSelectedWeekendDates(selectedWeekendDates));
+    return normalizedDates.filter((d) => {
+      if (!isWeekendDate(d)) return true;
+      return selectedSet.has(toISODateString(d));
+    });
+  }
+
+  return normalizedDates;
+}
+
+function weekendBillingModeLabel(mode) {
+  if (mode === "exclude_all") return "Exclude all weekends";
+  if (mode === "selected_only") return "Include selected weekends only";
+  return "Include all weekends";
+}
+
+function longTermPeriodLabel(period, customPeriod = "") {
+  if (period === "3_months") return "3 months";
+  if (period === "5_months") return "5 months";
+  if (period === "1_year") return "1 year";
+  if (period === "2_years") return "2 years";
+  if (period === "5_years") return "5 years";
+  if (period === "custom") return customPeriod || "Custom long-term period";
+  return "Not applicable";
+}
+
+function getBookingFuelInvoiceAmount(booking) {
+  if (!booking?.includeFuelOnInvoice) return 0;
+  return clampMoney(booking?.fuelInvoiceAmount || 0);
+}
+
+function computeBookingCompleteTotalAmountFromTotals(totals, includeFuel, fuelAmount) {
+  return clampMoney(totals?.totalNetClientAmount || 0) + (includeFuel ? clampMoney(fuelAmount || 0) : 0);
+}
+
 function computeItemSplit(rawItem, fallbackSelectedDates = [], cars = []) {
-  const itemDates = normalizeSelectedDates(
-    Array.isArray(rawItem?.selectedDates) && rawItem.selectedDates.length
-      ? rawItem.selectedDates
-      : fallbackSelectedDates
+  const itemDates = applyWeekendBillingModeToDates(
+    normalizeSelectedDates(
+      Array.isArray(rawItem?.selectedDates) && rawItem.selectedDates.length
+        ? rawItem.selectedDates
+        : fallbackSelectedDates
+    ),
+    rawItem?.weekendBillingMode || "include_all",
+    rawItem?.selectedWeekendDates || []
   );
   const days = itemDates.length;
   const carObj = cars.find((c) => String(c.number) === String(rawItem.carNumber));
@@ -357,6 +427,9 @@ function computeItemSplit(rawItem, fallbackSelectedDates = [], cars = []) {
     dispatchCloseoutAt: rawItem.dispatchCloseoutAt || null,
     dispatchCloseoutByEmail: rawItem.dispatchCloseoutByEmail || "",
     selectedDates: itemDates,
+    weekendBillingMode: rawItem.weekendBillingMode || "include_all",
+    weekendBillingModeLabel: weekendBillingModeLabel(rawItem.weekendBillingMode || "include_all"),
+    selectedWeekendDates: normalizeSelectedWeekendDates(rawItem.selectedWeekendDates || []),
     dateText: itemDates.map(toISODateString).join(", "),
     supplierRate,
     adminCharge,
@@ -567,9 +640,10 @@ function getBookingTotals(b, cars = []) {
 }
 function computeBookingTotalAmount(b, cars = []) {
   const totals = getBookingTotals(b, cars);
+  const fuelInvoiceAmount = getBookingFuelInvoiceAmount(b);
   if (b?.status === "cancelled") return Number(b?.penalty || 0) > 0 ? Number(b.penalty) : 0;
   if (b?.status === "confirmed" && Number(b?.confirmedAmount || 0) > 0) return Number(b.confirmedAmount);
-  return totals.totalNetClientAmount;
+  return totals.totalNetClientAmount + fuelInvoiceAmount;
 }
 function computePaymentStatus(total, paid) {
   const t = clampMoney(total), p = clampMoney(paid);
@@ -643,6 +717,10 @@ export default function Dashboard() {
   const [role, setRole] = useState("viewer");
   const [roleEmail, setRoleEmail] = useState("");
   const [loadingRole, setLoadingRole] = useState(true);
+  const [loginEmail, setLoginEmail] = useState("");
+  const [loginPassword, setLoginPassword] = useState("");
+  const [loginLoading, setLoginLoading] = useState(false);
+  const [loginError, setLoginError] = useState("");
   const [activeView, setActiveView] = useState("overview");
 
   const [bookings, setBookings] = useState([]);
@@ -661,6 +739,16 @@ export default function Dashboard() {
   const [selectedDates, setSelectedDates] = useState([]);
   const [bookingItems, setBookingItems] = useState([blankBookingItem()]);
   const [editBookingId, setEditBookingId] = useState(null);
+
+  const [bookingComments, setBookingComments] = useState("");
+  const [hireType, setHireType] = useState("short_term");
+  const [longTermPeriod, setLongTermPeriod] = useState("");
+  const [customLongTermPeriod, setCustomLongTermPeriod] = useState("");
+  const [weekendBillingMode, setWeekendBillingMode] = useState("include_all");
+  const [selectedWeekendDates, setSelectedWeekendDates] = useState("");
+  const [includeFuelOnInvoice, setIncludeFuelOnInvoice] = useState(false);
+  const [fuelInvoiceAmount, setFuelInvoiceAmount] = useState("");
+  const [fuelInvoiceDescription, setFuelInvoiceDescription] = useState("Fuel billed to client");
 
   const [newSourceName, setNewSourceName] = useState("");
   const [newSourceType, setNewSourceType] = useState("main");
@@ -831,7 +919,12 @@ export default function Dashboard() {
     return onSnapshot(qy, (snap) => setSupplierPaymentHistory(snap.docs.map((d) => ({ id: d.id, ...d.data() }))), (e) => console.error("Supplier payment history listener error:", e));
   }, [supplierPaymentOpen, supplierPaymentBooking]);
 
-  const formItemsComputed = useMemo(() => bookingItems.map((item) => computeItemSplit({ ...item, clientVatMode: item.clientVatMode || getDefaultClientVatMode(companyProfile) }, [], cars)), [bookingItems, cars, companyProfile]);
+  const formItemsComputed = useMemo(() => bookingItems.map((item) => computeItemSplit({
+    ...item,
+    weekendBillingMode,
+    selectedWeekendDates: normalizeSelectedWeekendDates(selectedWeekendDates),
+    weekendBillingMode: item.weekendBillingMode || b.weekendBillingMode || "include_all", selectedWeekendDates: item.selectedWeekendDates || b.selectedWeekendDates || [], clientVatMode: item.clientVatMode || getDefaultClientVatMode(companyProfile)
+  }, [], cars)), [bookingItems, cars, companyProfile, weekendBillingMode, selectedWeekendDates]);
   const formTotals = useMemo(() => computePricingTotals(formItemsComputed), [formItemsComputed]);
   const formVatSummary = useMemo(() => computeBookingVatSummaryFromItems(formItemsComputed), [formItemsComputed]);
 
@@ -2010,6 +2103,31 @@ export default function Dashboard() {
       console.error("Notify error:", e);
     }
   };
+  // phase3v-d-restore-login-form
+  const loginWithEmail = async (e) => {
+    e.preventDefault();
+    setLoginError("");
+    if (!loginEmail.trim()) {
+      setLoginError("Enter your email address.");
+      return;
+    }
+    if (!loginPassword) {
+      setLoginError("Enter your password.");
+      return;
+    }
+
+    setLoginLoading(true);
+    try {
+      await signInWithEmailAndPassword(auth, loginEmail.trim(), loginPassword);
+      setLoginPassword("");
+    } catch (err) {
+      console.error("Login error:", err);
+      setLoginError(err?.message || "Login failed. Check email/password and try again.");
+    } finally {
+      setLoginLoading(false);
+    }
+  };
+
   const logout = async () => signOut(auth);
   const saveCompanyProfile = async () => {
     if (!can(role, "settings")) return alert("Only Admin can update company settings.");
@@ -2047,6 +2165,7 @@ export default function Dashboard() {
   };
   const resetBookingForm = () => {
     setCustomer(""); setCustomerEmail(""); setCustomerPhone(""); setTravelFrom(""); setTravelTo(""); setPreferredChannel("email"); setDriver(""); setDriverPhone(""); setSelectedDates([]); setBookingItems([{ ...blankBookingItem(), clientVatMode: getDefaultClientVatMode(companyProfile) }]); setEditBookingId(null);
+    setBookingComments(""); setHireType("short_term"); setLongTermPeriod(""); setCustomLongTermPeriod(""); setWeekendBillingMode("include_all"); setSelectedWeekendDates(""); setIncludeFuelOnInvoice(false); setFuelInvoiceAmount(""); setFuelInvoiceDescription("Fuel billed to client");
   };
   const populateExistingCustomer = (selectedName) => {
     const value = String(selectedName || "");
@@ -2112,7 +2231,12 @@ export default function Dashboard() {
     if (!can(role, "addBooking") && !can(role, "editBooking")) return alert("You do not have permission to add/edit bookings.");
     const error = validateBooking();
     if (error) return alert(error);
-    const computedItems = bookingItems.map((item) => computeItemSplit({ ...item, clientVatMode: item.clientVatMode || getDefaultClientVatMode(companyProfile) }, [], cars));
+    const computedItems = bookingItems.map((item) => computeItemSplit({
+      ...item,
+      weekendBillingMode,
+      selectedWeekendDates: normalizeSelectedWeekendDates(selectedWeekendDates),
+      clientVatMode: item.clientVatMode || getDefaultClientVatMode(companyProfile)
+    }, [], cars));
     const normSelected = computeBookingDateSummary(computedItems);
     const pricingTotals = computePricingTotals(computedItems);
     const mainItem = computedItems[0] || {};
@@ -2124,6 +2248,17 @@ export default function Dashboard() {
       travelTo: (mainItem.travelTo || "").trim(),
       routeSummary: Array.from(new Set(computedItems.map((i) => `${i.travelFrom || "—"} → ${i.travelTo || "—"}`))).join(" | "),
       preferredChannel: preferredChannel || "email",
+      comments: (bookingComments || "").trim(),
+      hireType: hireType || "short_term",
+      longTermPeriod: hireType === "long_term" ? (longTermPeriod || "") : "",
+      customLongTermPeriod: hireType === "long_term" && longTermPeriod === "custom" ? (customLongTermPeriod || "").trim() : "",
+      longTermPeriodText: hireType === "long_term" ? longTermPeriodLabel(longTermPeriod, customLongTermPeriod) : "Not applicable",
+      weekendBillingMode: weekendBillingMode || "include_all",
+      weekendBillingModeText: weekendBillingModeLabel(weekendBillingMode || "include_all"),
+      selectedWeekendDates: normalizeSelectedWeekendDates(selectedWeekendDates),
+      includeFuelOnInvoice: Boolean(includeFuelOnInvoice),
+      fuelInvoiceAmount: includeFuelOnInvoice ? clampMoney(fuelInvoiceAmount) : 0,
+      fuelInvoiceDescription: includeFuelOnInvoice ? (fuelInvoiceDescription || "Fuel billed to client").trim() : "",
       driver: (mainItem.driver || "").trim(),
       driverPhone: (mainItem.driverPhone || "").trim(),
       selectedDates: normSelected,
@@ -2140,6 +2275,7 @@ export default function Dashboard() {
       adminCharge: mainItem.adminCharge || 0,
       clientDailyRate: mainItem.clientDailyRate || 0,
       dailyRate: mainItem.clientDailyRate || 0,
+      chargeableDays: normSelected.length,
       discountType: mainItem.discountType || "none",
       discountValue: mainItem.discountValue || 0,
       supplierDiscountSharePct: mainItem.supplierDiscountSharePct || 0,
@@ -2152,7 +2288,7 @@ export default function Dashboard() {
       const current = bookings.find((b) => b.id === editBookingId) || {};
       const existingPaid = clampMoney(current.amountPaid || 0);
       const currentStatus = current.status || "pending";
-      const updatedTotal = pricingTotals.totalNetClientAmount;
+      const updatedTotal = computeBookingCompleteTotalAmountFromTotals(pricingTotals, includeFuelOnInvoice, fuelInvoiceAmount);
       await updateDoc(doc(db, "bookings", editBookingId), {
         ...bookingData,
         status: currentStatus,
@@ -2181,6 +2317,15 @@ export default function Dashboard() {
   const editBooking = (b) => {
     if (!can(role, "editBooking")) return alert("You do not have permission to edit bookings.");
     setCustomer(b.customer || ""); setCustomerEmail(b.customerEmail || ""); setCustomerPhone(b.customerPhone || ""); setTravelFrom(b.travelFrom || ""); setTravelTo(b.travelTo || ""); setPreferredChannel(b.preferredChannel || "email"); setDriver(b.driver || ""); setDriverPhone(b.driverPhone || ""); setSelectedDates(normalizeSelectedDates(b.selectedDates));
+    setBookingComments(b.comments || "");
+    setHireType(b.hireType || "short_term");
+    setLongTermPeriod(b.longTermPeriod || "");
+    setCustomLongTermPeriod(b.customLongTermPeriod || "");
+    setWeekendBillingMode(b.weekendBillingMode || "include_all");
+    setSelectedWeekendDates((Array.isArray(b.selectedWeekendDates) ? b.selectedWeekendDates : []).join(", "));
+    setIncludeFuelOnInvoice(Boolean(b.includeFuelOnInvoice));
+    setFuelInvoiceAmount(b.fuelInvoiceAmount || "");
+    setFuelInvoiceDescription(b.fuelInvoiceDescription || "Fuel billed to client");
     setBookingItems(getBookingItems(b, cars).map((item) => ({ ...item, selectedDates: normalizeSelectedDates(item.selectedDates), travelFrom: item.travelFrom || b.travelFrom || "", travelTo: item.travelTo || b.travelTo || "", driver: item.driver || b.driver || "", driverPhone: item.driverPhone || b.driverPhone || "", supplierRate: String(item.supplierRate ?? ""), adminCharge: String(item.adminCharge ?? ""), discountValue: item.discountType === "none" ? "" : String(item.discountValue ?? ""), supplierDiscountSharePct: String(item.supplierDiscountSharePct ?? 50), adminDiscountSharePct: String(item.adminDiscountSharePct ?? 50), clientVatMode: item.clientVatMode || getDefaultClientVatMode(companyProfile) })));
     setEditBookingId(b.id);
     setActiveView("bookings");
@@ -2188,7 +2333,7 @@ export default function Dashboard() {
   const confirmBooking = async (b) => {
     if (!can(role, "confirmBooking")) return alert("Only Admin can confirm bookings.");
     const totals = getBookingTotals(b, cars);
-    const amt = totals.totalNetClientAmount;
+    const amt = computeBookingTotalAmount({ ...b, pricingTotals: totals }, cars);
     await updateDoc(doc(db, "bookings", b.id), { status: "confirmed", confirmedAmount: amt, penalty: 0, pricingTotals: totals, updatedAt: serverTimestamp() });
     await addDoc(collection(db, "audit"), sanitizeForFirestore({ action: `Booking confirmed (${b.customer}) — Vehicles: ${getBookingItems(b, cars).length} — Amount ${currencyGH(amt)}`, userId: user?.email || roleEmail || "", uid: user?.uid || "", time: serverTimestamp() }));
     await sendEmailNotification({ toEmail: b.customerEmail, bookingId: b.id, actionType: "booking_confirmed", subject: `Booking Confirmed - ${b.customer || "Customer"}`, message: `Hello ${b.customer || "Customer"},\n\nYour booking is CONFIRMED.\n\nVehicles: ${getBookingItems(b, cars).length}\nRoutes: ${Array.from(new Set(getBookingItems(b, cars).map((i) => `${i.travelFrom || "—"} → ${i.travelTo || "—"}`))).join(" | ")}\nDates: ${computeBookingDateSummary(getBookingItems(b, cars)).map(toISODateString).join(", ")}\nClient Net: ${currencyGH(amt)}\n\nThank you.` });
@@ -2449,7 +2594,56 @@ export default function Dashboard() {
     setPaymentOpen(false);
   };
 
-  if (!user) return <div className="p-10 text-center text-xl">Login first to load dashboard</div>;
+  if (!user) return (
+    <div className="min-h-screen flex items-center justify-center bg-slate-50 p-4">
+      <Card className="w-full max-w-md rounded-2xl shadow">
+        <CardContent className="p-6 space-y-4">
+          <div className="text-center space-y-1">
+            <h1 className="text-2xl font-bold">MAALVILA Rental System</h1>
+            <p className="text-sm text-gray-600">Sign in to load the dashboard.</p>
+          </div>
+
+          <form onSubmit={loginWithEmail} className="space-y-3">
+            <div>
+              <label className="text-xs text-gray-600">Email</label>
+              <Input
+                type="email"
+                value={loginEmail}
+                onChange={(e) => setLoginEmail(e.target.value)}
+                placeholder="Enter email"
+                autoComplete="email"
+              />
+            </div>
+
+            <div>
+              <label className="text-xs text-gray-600">Password</label>
+              <Input
+                type="password"
+                value={loginPassword}
+                onChange={(e) => setLoginPassword(e.target.value)}
+                placeholder="Enter password"
+                autoComplete="current-password"
+              />
+            </div>
+
+            {loginError ? (
+              <div className="text-sm text-red-700 bg-red-50 border border-red-200 rounded-xl p-2">
+                {loginError}
+              </div>
+            ) : null}
+
+            <Button type="submit" className="w-full" disabled={loginLoading}>
+              {loginLoading ? "Signing in..." : "Sign In"}
+            </Button>
+          </form>
+
+          <div className="text-xs text-gray-500 text-center">
+            Use the Firebase Auth email and password created for MAALVILA.
+          </div>
+        </CardContent>
+      </Card>
+    </div>
+  );
   if (loadingRole) return <div className="p-10 text-center text-lg">Loading role...</div>;
 
   const kpiCards = [
@@ -3044,7 +3238,90 @@ export default function Dashboard() {
 
     {activeView === "cars" && <><Card className="rounded-2xl shadow"><CardContent className="p-4 space-y-3"><h2 className="text-lg font-semibold">Add Source / Supplier</h2>{can(role, "addSource") ? <><div className="grid md:grid-cols-3 gap-2"><Input placeholder="Source Name" value={newSourceName} onChange={(e) => setNewSourceName(e.target.value)} /><select className="border rounded-lg p-2 text-sm h-10" value={newSourceType} onChange={(e) => setNewSourceType(e.target.value)}><option value="main">Main / MAALVILA</option><option value="rental_company">Attached Rental Company</option><option value="individual">Individual / Other</option></select><Input placeholder="Contact Person" value={newSourceContactPerson} onChange={(e) => setNewSourceContactPerson(e.target.value)} /><Input placeholder="Phone" value={newSourcePhone} onChange={(e) => setNewSourcePhone(e.target.value)} /><Input placeholder="Email" value={newSourceEmail} onChange={(e) => setNewSourceEmail(e.target.value)} /><Input placeholder="Address" value={newSourceAddress} onChange={(e) => setNewSourceAddress(e.target.value)} /></div><Button onClick={addSource}>Add Source</Button></> : <div className="text-sm text-gray-500">Only Admin can add sources.</div>}</CardContent></Card><Card className="rounded-2xl shadow"><CardContent className="p-4 space-y-3"><h2 className="text-lg font-semibold">Add Car</h2>{can(role, "addCar") ? <><div className="grid md:grid-cols-4 gap-2"><Input placeholder="Car Name" value={newCarName} onChange={(e) => setNewCarName(e.target.value)} /><Input placeholder="Car Number" value={newCarNumber} onChange={(e) => setNewCarNumber(e.target.value)} /><select className="border rounded-lg p-2 text-sm h-10" value={newCarSourceId} onChange={(e) => setNewCarSourceId(e.target.value)}><option value="">Select Source</option>{sources.map((s) => <option key={s.id} value={s.id}>{s.sourceName} — {sourceTypeLabel(s.sourceType)}</option>)}</select><Button onClick={addCar}>Add Car</Button></div></> : <div className="text-sm text-gray-500">Only Admin can add cars.</div>}</CardContent></Card><Card className="rounded-2xl shadow"><CardContent className="p-4 space-y-3"><div className="flex flex-col md:flex-row md:items-center md:justify-between gap-2"><div><h2 className="text-lg font-semibold">Fleet Data Quality Checks</h2><div className="text-sm text-gray-600">Flags duplicate registration numbers and cars without a valid source before they create scheduling confusion.</div></div><div className="text-xs text-gray-500">This section does not change KPI calculations.</div></div><div className="grid md:grid-cols-2 gap-3"><div className="border rounded-xl p-3 bg-white"><div className="font-semibold text-sm mb-2">Duplicate Car Numbers</div>{duplicateCarNumberGroups.length ? <div className="space-y-2">{duplicateCarNumberGroups.map((dup) => <div key={dup.normalizedNumber} className="text-sm p-2 rounded-lg bg-amber-50 border border-amber-200"><div className="font-semibold">{dup.normalizedNumber}</div><div className="text-xs text-gray-700">{dup.group.map((car) => `${car.name || "Unnamed"} — ${car.sourceName || "No source"}`).join(" | ")}</div></div>)}</div> : <div className="text-sm text-emerald-700 bg-emerald-50 border border-emerald-200 rounded-lg p-2">No duplicate car numbers detected.</div>}</div><div className="border rounded-xl p-3 bg-white"><div className="font-semibold text-sm mb-2">Cars Without Valid Source</div>{unassignedCars.length ? <div className="space-y-2">{unassignedCars.map((car) => <div key={car.id || car.number} className="text-sm p-2 rounded-lg bg-rose-50 border border-rose-200"><b>{car.name || "Unnamed"}</b> ({car.number || "No number"})<div className="text-xs text-gray-700">Current source: {car.sourceName || "Not assigned"}</div></div>)}</div> : <div className="text-sm text-emerald-700 bg-emerald-50 border border-emerald-200 rounded-lg p-2">All cars have valid sources.</div>}</div></div><div className="text-xs text-gray-500">For duplicate numbers already in Firestore, keep the correct vehicle and remove or correct the duplicate record manually in Firebase Console if needed.</div></CardContent></Card><Card className="rounded-2xl shadow"><CardContent className="p-4"><h2 className="text-lg font-semibold mb-3">Sources / Suppliers</h2><div className="overflow-auto"><table className="w-full text-sm"><thead><tr className="text-left text-gray-600 border-b"><th className="py-2 pr-4">Source</th><th className="py-2 pr-4">Type</th><th className="py-2 pr-4">Cars</th><th className="py-2 pr-4">Bookings</th><th className="py-2 pr-4">Vehicle Lines</th><th className="py-2 pr-4">Supplier Payable</th><th className="py-2 pr-4">Admin Income</th></tr></thead><tbody>{sourceSummary.map((s) => <tr key={s.sourceId} className="border-b"><td className="py-2 pr-4 font-medium">{s.sourceName}</td><td className="py-2 pr-4"><span className={`inline-flex items-center px-2 py-1 border rounded-xl text-xs ${sourceBadgeClass(s.sourceType)}`}>{sourceTypeLabel(s.sourceType)}</span></td><td>{s.cars}</td><td>{s.bookings}</td><td>{s.vehicleLines}</td><td>{currencyGH(s.netSupplierPayable)}</td><td>{currencyGH(s.adminIncome)}</td></tr>)}{!sourceSummary.length && <tr><td colSpan={7} className="py-3 text-gray-500">No sources added yet.</td></tr>}</tbody></table></div></CardContent></Card><Card className="rounded-2xl shadow"><CardContent className="p-4"><h2 className="text-lg font-semibold mb-3">Cars List</h2><table className="w-full text-sm"><tbody>{cars.map((c) => <tr key={c.id} className="border-b"><td className="py-2 font-medium">{c.name}</td><td>{c.number}</td><td>{c.sourceName || "Not assigned"}</td><td>{sourceTypeLabel(c.sourceType)}</td></tr>)}{!cars.length && <tr><td className="py-3 text-gray-500">No cars added yet.</td></tr>}</tbody></table></CardContent></Card></>}
 
-    {activeView === "bookings" && <><Card className="rounded-2xl shadow"><CardContent className="p-4 space-y-4"><div className="flex items-center justify-between gap-2"><h2 className="text-lg font-semibold">{editBookingId ? "Edit Multi-Car Booking" : "New Multi-Car Booking"}</h2><div className="text-xs text-gray-500">One client booking can now include multiple cars.</div></div>{can(role, "addBooking") ? <><div className="grid md:grid-cols-4 gap-2 items-start"><div className="space-y-1"><Input placeholder="Customer Name" list="existing-customer-list" value={customer} onChange={(e) => populateExistingCustomer(e.target.value)} /><datalist id="existing-customer-list">{customerDirectory.map((c) => <option key={`${c.name}-${c.email}-${c.phone}`} value={c.name}>{[c.email, c.phone].filter(Boolean).join(" • ")}</option>)}</datalist><div className="text-xs text-gray-500">Existing customer search: type or select from {customerDirectory.length} saved customer(s).</div></div><Input placeholder="Customer Email" value={customerEmail} onChange={(e) => setCustomerEmail(e.target.value)} /><Input placeholder="Customer Phone" value={customerPhone} onChange={(e) => setCustomerPhone(e.target.value)} /><select className="border rounded-lg p-2 text-sm h-10" value={preferredChannel} onChange={(e) => setPreferredChannel(e.target.value)}><option value="email">Email</option><option value="whatsapp" disabled>WhatsApp later</option><option value="sms" disabled>SMS later</option></select></div><div className="text-sm p-2 rounded-lg bg-white border">Client Net Preview: <b>{currencyGH(formTotals.totalNetClientAmount)}</b></div><div className="text-sm p-2 rounded-lg bg-amber-50 border border-amber-200">Enter route, driver, and trip days inside each vehicle line. Different cars can share the same dates or have different routes/dates.</div><div className="space-y-3"><div className="flex items-center justify-between"><h3 className="font-semibold">Vehicle Line Items</h3><Button type="button" variant="outline" onClick={addBookingItem} className="gap-2"><Plus className="w-4 h-4" /> Add Car Line</Button></div>{bookingItems.map((item, idx) => { const computed = formItemsComputed.find((x) => x.itemId === item.itemId) || computeItemSplit(item, [], cars); return <Card key={item.itemId} className="rounded-xl border bg-white"><CardContent className="p-3 space-y-3"><div className="flex items-center justify-between"><div className="font-semibold text-sm">Vehicle Line {idx + 1}</div>{bookingItems.length > 1 && <Button variant="outline" size="sm" className="gap-2" onClick={() => removeBookingItem(item.itemId)}><Trash2 className="w-4 h-4" /> Remove</Button>}</div><div className="grid md:grid-cols-5 gap-2"><select className="border rounded-lg p-2 text-sm h-10" value={item.carNumber} onChange={(e) => { const c = cars.find((x) => String(x.number) === String(e.target.value)); const defaultSupplierPct = c?.sourceType === "main" ? 0 : 50; const defaultAdminPct = c?.sourceType === "main" ? 100 : 50; updateBookingItem(item.itemId, { carNumber: e.target.value, supplierDiscountSharePct: defaultSupplierPct, adminDiscountSharePct: defaultAdminPct }); }}><option value="">Select Car</option>{cars.map((c) => <option key={c.id} value={c.number}>{c.name} ({c.number}) — {c.sourceName || "No source"}</option>)}</select><Input placeholder="Travel From for this car" value={item.travelFrom || ""} onChange={(e) => updateBookingItem(item.itemId, { travelFrom: e.target.value })} /><Input placeholder="Travel To for this car" value={item.travelTo || ""} onChange={(e) => updateBookingItem(item.itemId, { travelTo: e.target.value })} /><Input placeholder="Driver for this car" value={item.driver || ""} onChange={(e) => updateBookingItem(item.itemId, { driver: e.target.value })} /><Input placeholder="Driver Contact" value={item.driverPhone || ""} onChange={(e) => updateBookingItem(item.itemId, { driverPhone: e.target.value })} /></div><div className="grid md:grid-cols-4 gap-2"><Input type="number" placeholder="Supplier Rate (GHS)" value={item.supplierRate} onChange={(e) => updateBookingItem(item.itemId, { supplierRate: e.target.value })} /><Input type="number" placeholder="MAALVILA Admin Charge (GHS)" value={item.adminCharge} onChange={(e) => updateBookingItem(item.itemId, { adminCharge: e.target.value })} /><select className="border rounded-lg p-2 text-sm h-10" value={item.clientVatMode || getDefaultClientVatMode(companyProfile)} onChange={(e) => updateBookingItem(item.itemId, { clientVatMode: e.target.value })}><option value="exclusive">VAT Exclusive - add tax on top</option><option value="inclusive">VAT Inclusive - extract tax from rate</option><option value="none">No VAT / VAT not required</option><option value="exempt">VAT Exempt client</option></select><div className="text-sm p-2 border rounded-lg bg-slate-50">Client Daily: <b>{currencyGH(computed.clientDailyRate)}</b></div></div><div className="grid md:grid-cols-5 gap-2"><select className="border rounded-lg p-2 text-sm h-10" value={item.discountType} onChange={(e) => updateBookingItem(item.itemId, { discountType: e.target.value, discountValue: e.target.value === "none" ? "" : item.discountValue })}><option value="none">No Discount</option><option value="fixed">Fixed Amount (GHS)</option><option value="percentage">Percentage of Client Gross (%)</option></select><Input type="number" placeholder={item.discountType === "fixed" ? "Discount Amount (GHS), e.g. 120" : item.discountType === "percentage" ? "Discount Rate %, e.g. 5" : "No Discount"} value={item.discountValue} disabled={item.discountType === "none"} onChange={(e) => updateBookingItem(item.itemId, { discountValue: e.target.value })} /><Input type="number" placeholder="Supplier Share %" value={item.supplierDiscountSharePct} onChange={(e) => updateBookingItem(item.itemId, { supplierDiscountSharePct: e.target.value })} /><Input type="number" placeholder="MAALVILA Share %" value={item.adminDiscountSharePct} onChange={(e) => updateBookingItem(item.itemId, { adminDiscountSharePct: e.target.value })} /><div className="text-xs p-2 border rounded-lg bg-slate-50">Shares: {Number(item.supplierDiscountSharePct || 0) + Number(item.adminDiscountSharePct || 0)}%</div></div><div className="border rounded-xl p-2 bg-white"><div className="text-sm font-medium flex items-center gap-2 mb-2"><CalendarDays className="w-4 h-4" />Trip Days for this car line</div><div className="inline-block border rounded-xl p-2 bg-white"><Calendar mode="multiple" selected={normalizeSelectedDates(item.selectedDates)} onSelect={(dates) => updateBookingItem(item.itemId, { selectedDates: normalizeSelectedDates(dates) })} className="rounded-lg" /></div><div className="text-xs text-gray-500 mt-2">Selected: {normalizeSelectedDates(item.selectedDates).map(toISODateString).join(", ") || "None"}</div></div><div className="grid md:grid-cols-4 gap-2 text-xs text-gray-700"><div className="p-2 rounded-lg bg-blue-50 border">Client Gross: <b>{currencyGH(computed.grossClientAmount)}</b><br />Discount: <b>{currencyGH(computed.discountAmount)}</b><br />Client Net: <b>{currencyGH(computed.netClientAmount)}</b></div><div className="p-2 rounded-lg bg-indigo-50 border">VAT Treatment: <b>{clientVatModeLabel(computed.clientVatMode)}</b><br />Tax: <b>{currencyGH(computed.taxAmount)}</b><br />Client Grand: <b>{currencyGH(computed.clientGrandTotal)}</b></div><div className="p-2 rounded-lg bg-rose-50 border">Supplier Gross: <b>{currencyGH(computed.grossSupplierAmount)}</b><br />Discount Share: <b>{currencyGH(computed.supplierDiscountShare)}</b><br />Payable: <b>{currencyGH(computed.netSupplierPayable)}</b></div><div className="p-2 rounded-lg bg-emerald-50 border">Admin Gross: <b>{currencyGH(computed.grossAdminAmount)}</b><br />Discount Share: <b>{currencyGH(computed.adminDiscountShare)}</b><br />Admin Income: <b>{currencyGH(computed.netAdminIncome)}</b></div></div></CardContent></Card>; })}</div><Card className="rounded-xl bg-slate-900 text-white"><CardContent className="p-3 grid md:grid-cols-4 gap-2 text-sm"><div>Client Gross: <b>{currencyGH(formTotals.totalGrossClientAmount)}</b></div><div>Total Discount: <b>{currencyGH(formTotals.totalDiscountAmount)}</b></div><div>Client Net: <b>{currencyGH(formTotals.totalNetClientAmount)}</b></div><div>VAT/NHIL/GETFund: <b>{currencyGH(formVatSummary.totalTax)}</b></div><div>Client Grand Total: <b>{currencyGH(formVatSummary.grandTotal)}</b></div><div>Supplier Payable: <b>{currencyGH(formTotals.totalNetSupplierPayable)}</b></div><div>Admin Income: <b>{currencyGH(formTotals.totalNetAdminIncome)}</b></div></CardContent></Card><div className="flex flex-wrap gap-2"><Button onClick={saveBooking}>{editBookingId ? "Update Booking" : "Save Multi-Car Booking"}</Button>{editBookingId && <Button variant="outline" onClick={resetBookingForm}>Cancel Edit</Button>}</div></> : <div className="text-sm text-gray-500">You do not have permission to add bookings.</div>}</CardContent></Card><Card className="rounded-2xl shadow"><CardContent className="p-4 space-y-3"><div className="flex flex-col md:flex-row md:items-center md:justify-between gap-2"><h2 className="text-lg font-semibold">Filter / Export</h2><div className="text-xs text-gray-500">Showing <b>{filteredBookings.length}</b> / {bookings.length} bookings</div></div><div className="grid md:grid-cols-7 gap-2"><select className="border rounded-lg p-2 text-sm h-10" value={filterCar} onChange={(e) => setFilterCar(e.target.value)}><option value="">All Cars</option>{cars.map((c) => <option key={c.id} value={c.number}>{c.name} ({c.number})</option>)}</select><select className="border rounded-lg p-2 text-sm h-10" value={filterSource} onChange={(e) => setFilterSource(e.target.value)}><option value="">All Sources</option>{sources.map((s) => <option key={s.id} value={s.id}>{s.sourceName} — {sourceTypeLabel(s.sourceType)}</option>)}</select><select className="border rounded-lg p-2 text-sm h-10" value={filterStatus} onChange={(e) => setFilterStatus(e.target.value)}><option value="">All Statuses</option><option value="pending">Pending</option><option value="confirmed">Confirmed</option><option value="cancelled">Cancelled</option></select><Input type="date" value={filterStartDate} onChange={(e) => setFilterStartDate(e.target.value)} /><Input type="date" value={filterEndDate} onChange={(e) => setFilterEndDate(e.target.value)} /><Button onClick={exportCSV} disabled={!can(role, "export")}>Export CSV</Button><Button onClick={() => window.print()} variant="outline" disabled={!can(role, "export")}>Print</Button></div></CardContent></Card><Card className="rounded-2xl"><CardContent className="p-4"><h2 className="text-lg font-semibold mb-3">Bookings</h2><div className="space-y-3">{filteredBookings.map((b) => { const items = getBookingItems(b, cars); const totals = getBookingTotals(b, cars); const total = computeBookingTotalAmount(b, cars); const paid = clampMoney(b.amountPaid || 0); const balance = Math.max(0, total - paid); const payStatus = b.paymentStatus || computePaymentStatus(total, paid); const statusClass = b.status === "confirmed" ? "text-green-700 bg-green-50 border-green-200" : b.status === "pending" ? "text-yellow-800 bg-yellow-50 border-yellow-200" : "text-red-700 bg-red-50 border-red-200"; const payClass = payStatus === "paid" ? "text-emerald-800 bg-emerald-50 border-emerald-200" : payStatus === "partial" ? "text-violet-800 bg-violet-50 border-violet-200" : "text-slate-700 bg-slate-50 border-slate-200"; const supplierSources = Array.from(new Set(items.map((i) => i.sourceId).filter(Boolean))); return <div key={b.id} className="border rounded-2xl p-3 bg-white hover:shadow-sm transition"><div className="flex flex-col md:flex-row md:items-start md:justify-between gap-2"><div className="space-y-2 flex-1"><div className="font-semibold text-lg">{b.customer}</div><div className="text-sm text-gray-700">Routes Summary: <b>{Array.from(new Set(items.map((i) => `${i.travelFrom || "—"} → ${i.travelTo || "—"}`))).join(" | ")}</b></div><div className="text-sm text-gray-700">Contact: <b>{b.customerEmail || "—"}</b>{b.customerPhone ? <span> • {b.customerPhone}</span> : null}</div><div className="text-sm text-gray-700">Booking Dates Summary: <span className="font-medium">{computeBookingDateSummary(items).map(toISODateString).join(", ")}</span></div><div className="overflow-auto"><table className="w-full text-xs border"><thead><tr className="bg-slate-50 text-left"><th className="p-2">Car</th><th className="p-2">Route</th><th className="p-2">Driver</th><th className="p-2">Dates</th><th className="p-2">Source</th><th className="p-2 text-right">Supplier Payable</th><th className="p-2 text-right">Admin Income</th><th className="p-2 text-right">Client Net</th></tr></thead><tbody>{items.map((i) => <tr key={i.itemId} className="border-t"><td className="p-2"><b>{i.carName}</b> ({i.carNumber})</td><td className="p-2">{i.travelFrom || "—"} → {i.travelTo || "—"}</td><td className="p-2">{i.driver || "—"}{i.driverPhone ? ` (${i.driverPhone})` : ""}</td><td className="p-2">{normalizeSelectedDates(i.selectedDates).map(toISODateString).join(", ")}</td><td className="p-2">{i.sourceName || "—"}</td><td className="p-2 text-right">{currencyGH(i.netSupplierPayable)}</td><td className="p-2 text-right">{currencyGH(i.netAdminIncome)}</td><td className="p-2 text-right font-medium">{currencyGH(i.netClientAmount)}</td></tr>)}</tbody></table></div><div className="flex flex-wrap gap-2 text-sm"><span className={`inline-flex items-center px-2 py-1 border rounded-xl text-xs ${statusClass}`}>Status: {b.status || "pending"}</span><span className={`inline-flex items-center px-2 py-1 border rounded-xl text-xs ${payClass}`}>Payment: {payStatus}</span><span className="inline-flex items-center px-2 py-1 border rounded-xl text-xs bg-slate-50">Vehicle Lines: {items.length}</span></div><div className="grid md:grid-cols-3 gap-2 text-xs"><div className="p-2 rounded-lg bg-blue-50 border">Client Gross: <b>{currencyGH(totals.totalGrossClientAmount)}</b><br />Discount: <b>{currencyGH(totals.totalDiscountAmount)}</b><br />Client Net: <b>{currencyGH(totals.totalNetClientAmount)}</b></div><div className="p-2 rounded-lg bg-rose-50 border">Supplier Payable: <b>{currencyGH(totals.totalNetSupplierPayable)}</b></div><div className="p-2 rounded-lg bg-emerald-50 border">Admin Income: <b>{currencyGH(totals.totalNetAdminIncome)}</b><br />Paid: <b>{currencyGH(paid)}</b><br />Balance: <b>{currencyGH(balance)}</b></div></div></div><div className="flex flex-wrap gap-2 md:justify-end">{can(role, "confirmBooking") && b.status === "pending" && <Button onClick={() => confirmBooking(b)}>Confirm</Button>}{can(role, "cancelBooking") && b.status !== "cancelled" && <Button variant="destructive" onClick={() => cancelBooking(b)}>Cancel</Button>}{can(role, "editBooking") && <Button variant="outline" onClick={() => editBooking(b)}>Edit</Button>}{can(role, "recordPayment") && <Button variant="outline" onClick={() => openPayment(b)}>Record Payment</Button>}{can(role, "recordSupplierPayment") && <Button variant="outline" className="gap-2" onClick={() => openSupplierPayment(b)}><Banknote className="w-4 h-4" /> Supplier Payment</Button>}<Button variant="outline" className="gap-2" onClick={() => openQuotation(b)}><ScrollText className="w-4 h-4" /> Quote</Button><Button variant="outline" className="gap-2" onClick={() => openInvoice(b)}><FileText className="w-4 h-4" /> Invoice</Button><Button variant="outline" className="gap-2" onClick={() => openReceipt(b)}><ReceiptText className="w-4 h-4" /> Receipt</Button>{supplierSources.length > 0 && <Button variant="outline" className="gap-2" onClick={() => openSupplierRequest(b)}><UsersRound className="w-4 h-4" /> Supplier Request</Button>}<Button variant="outline" className="gap-2 border-blue-300 text-blue-700" onClick={() => openSupplierResponse(b)}><UsersRound className="w-4 h-4" /> Supplier Response</Button>{supplierSources.length > 0 && <Button variant="outline" className="gap-2" onClick={() => openSupplierVoucher(b)}><ReceiptText className="w-4 h-4" /> Supplier Voucher</Button>}{supplierSources.length > 0 && <Button variant="outline" className="gap-2" onClick={() => openSupplierStatement(b)}><UsersRound className="w-4 h-4" /> Supplier Statement</Button>}</div></div></div>; })}{!filteredBookings.length && <div className="text-sm text-gray-500">No bookings match your filter.</div>}</div></CardContent></Card>{paymentOpen && paymentBooking && <Card className="rounded-2xl border-2"><CardContent className="p-4 space-y-3"><div className="flex items-center justify-between"><h2 className="text-lg font-semibold">Record Payment</h2><Button variant="outline" onClick={() => setPaymentOpen(false)}>Close</Button></div><div className="text-sm text-gray-700">Booking: <b>{paymentBooking.customer}</b> • Client Net: <b>{currencyGH(computeBookingTotalAmount(paymentBooking, cars))}</b></div><div className="grid md:grid-cols-5 gap-2"><Input type="number" placeholder="Amount (GH₵)" value={paymentAmount} onChange={(e) => setPaymentAmount(e.target.value)} /><select className="border rounded-lg p-2 text-sm h-10" value={paymentMethod} onChange={(e) => setPaymentMethod(e.target.value)}><option value="cash">Cash</option><option value="momo">MoMo</option><option value="bank">Bank</option><option value="card">Card</option></select><Input placeholder="Reference" value={paymentReference} onChange={(e) => setPaymentReference(e.target.value)} /><Input placeholder="Note" value={paymentNote} onChange={(e) => setPaymentNote(e.target.value)} /><Button onClick={recordPayment}>Save Payment</Button></div><div><h3 className="font-semibold text-sm mb-2">Payment History</h3>{paymentHistory.map((p) => <div key={p.id} className="text-sm border rounded-xl p-2 bg-white mb-2"><div className="font-medium">{currencyGH(p.amount)} • {p.method || "cash"}{p.reference ? ` • Ref: ${p.reference}` : ""}</div>{p.note ? <div className="text-xs text-gray-600">{p.note}</div> : null}<div className="text-xs text-gray-500">{safeTimeToLocaleString(p.paidAt)} • by {p.recordedByEmail || "unknown"}</div></div>)}{!paymentHistory.length && <div className="text-sm text-gray-500">No payments recorded yet.</div>}</div></CardContent></Card>}{supplierPaymentOpen && supplierPaymentBooking && <Card className="rounded-2xl border-2 border-rose-200"><CardContent className="p-4 space-y-3"><div className="flex items-center justify-between"><h2 className="text-lg font-semibold">Record Supplier Payment</h2><Button variant="outline" onClick={() => setSupplierPaymentOpen(false)}>Close</Button></div><div className="text-sm text-gray-700">Booking: <b>{supplierPaymentBooking.customer}</b></div><div className="grid md:grid-cols-6 gap-2"><select className="border rounded-lg p-2 text-sm h-10" value={supplierPaymentSourceId} onChange={(e) => setSupplierPaymentSourceId(e.target.value)}><option value="">Select Supplier</option>{Array.from(new Set(getBookingItems(supplierPaymentBooking, cars).map((i) => i.sourceId).filter(Boolean))).map((sid) => { const s = sources.find((x) => x.id === sid); return <option key={sid} value={sid}>{s?.sourceName || sid}</option>; })}</select><Input type="number" placeholder="Supplier Payment Amount (GHS)" value={supplierPaymentAmount} onChange={(e) => setSupplierPaymentAmount(e.target.value)} /><select className="border rounded-lg p-2 text-sm h-10" value={supplierPaymentMethod} onChange={(e) => setSupplierPaymentMethod(e.target.value)}><option value="cash">Cash</option><option value="momo">MoMo</option><option value="bank">Bank</option><option value="card">Card</option></select><Input placeholder="Reference" value={supplierPaymentReference} onChange={(e) => setSupplierPaymentReference(e.target.value)} /><Input placeholder="Note" value={supplierPaymentNote} onChange={(e) => setSupplierPaymentNote(e.target.value)} /><Button onClick={recordSupplierPayment}>Save Supplier Payment</Button></div><div><h3 className="font-semibold text-sm mb-2">Supplier Payment History</h3>{supplierPaymentHistory.filter((p) => !supplierPaymentSourceId || String(p.sourceId || "") === String(supplierPaymentSourceId)).map((p) => <div key={p.id} className="text-sm border rounded-xl p-2 bg-white mb-2"><div className="font-medium">{p.sourceName ? `${p.sourceName} • ` : ""}{currencyGH(p.amount)} • {p.method || "cash"}{p.reference ? ` • Ref: ${p.reference}` : ""}</div>{p.note ? <div className="text-xs text-gray-600">{p.note}</div> : null}<div className="text-xs text-gray-500">{safeTimeToLocaleString(p.paidAt)} • by {p.recordedByEmail || "unknown"}</div></div>)}{!supplierPaymentHistory.filter((p) => !supplierPaymentSourceId || String(p.sourceId || "") === String(supplierPaymentSourceId)).length && <div className="text-sm text-gray-500">No supplier payments recorded yet.</div>}</div></CardContent></Card>}</>}
+    {activeView === "bookings" && <><Card className="rounded-2xl shadow"><CardContent className="p-4 space-y-4"><div className="flex items-center justify-between gap-2"><h2 className="text-lg font-semibold">{editBookingId ? "Edit Multi-Car Booking" : "New Multi-Car Booking"}</h2><div className="text-xs text-gray-500">One client booking can now include multiple cars.</div></div>{can(role, "addBooking") ? <><div className="grid md:grid-cols-4 gap-2 items-start"><div className="space-y-1"><Input placeholder="Customer Name" list="existing-customer-list" value={customer} onChange={(e) => populateExistingCustomer(e.target.value)} /><datalist id="existing-customer-list">{customerDirectory.map((c) => <option key={`${c.name}-${c.email}-${c.phone}`} value={c.name}>{[c.email, c.phone].filter(Boolean).join(" • ")}</option>)}</datalist><div className="text-xs text-gray-500">Existing customer search: type or select from {customerDirectory.length} saved customer(s).</div></div><Input placeholder="Customer Email" value={customerEmail} onChange={(e) => setCustomerEmail(e.target.value)} /><Input placeholder="Customer Phone" value={customerPhone} onChange={(e) => setCustomerPhone(e.target.value)} /><select className="border rounded-lg p-2 text-sm h-10" value={preferredChannel} onChange={(e) => setPreferredChannel(e.target.value)}><option value="email">Email</option><option value="whatsapp" disabled>WhatsApp later</option><option value="sms" disabled>SMS later</option></select></div><div className="text-sm p-2 rounded-lg bg-white border">Client Net Preview: <b>{currencyGH(formTotals.totalNetClientAmount)}</b></div><div className="text-sm p-2 rounded-lg bg-amber-50 border border-amber-200">Enter route, driver, and trip days inside each vehicle line. Different cars can share the same dates or have different routes/dates.</div><div className="space-y-3"><div className="flex items-center justify-between"><h3 className="font-semibold">Vehicle Line Items</h3><Button type="button" variant="outline" onClick={addBookingItem} className="gap-2"><Plus className="w-4 h-4" /> Add Car Line</Button></div>{bookingItems.map((item, idx) => { const computed = formItemsComputed.find((x) => x.itemId === item.itemId) || computeItemSplit(item, [], cars); return <Card key={item.itemId} className="rounded-xl border bg-white"><CardContent className="p-3 space-y-3"><div className="flex items-center justify-between"><div className="font-semibold text-sm">Vehicle Line {idx + 1}</div>{bookingItems.length > 1 && <Button variant="outline" size="sm" className="gap-2" onClick={() => removeBookingItem(item.itemId)}><Trash2 className="w-4 h-4" /> Remove</Button>}</div><div className="grid md:grid-cols-5 gap-2"><select className="border rounded-lg p-2 text-sm h-10" value={item.carNumber} onChange={(e) => { const c = cars.find((x) => String(x.number) === String(e.target.value)); const defaultSupplierPct = c?.sourceType === "main" ? 0 : 50; const defaultAdminPct = c?.sourceType === "main" ? 100 : 50; updateBookingItem(item.itemId, { carNumber: e.target.value, supplierDiscountSharePct: defaultSupplierPct, adminDiscountSharePct: defaultAdminPct }); }}><option value="">Select Car</option>{cars.map((c) => <option key={c.id} value={c.number}>{c.name} ({c.number}) — {c.sourceName || "No source"}</option>)}</select><Input placeholder="Travel From for this car" value={item.travelFrom || ""} onChange={(e) => updateBookingItem(item.itemId, { travelFrom: e.target.value })} /><Input placeholder="Travel To for this car" value={item.travelTo || ""} onChange={(e) => updateBookingItem(item.itemId, { travelTo: e.target.value })} /><Input placeholder="Driver for this car" value={item.driver || ""} onChange={(e) => updateBookingItem(item.itemId, { driver: e.target.value })} /><Input placeholder="Driver Contact" value={item.driverPhone || ""} onChange={(e) => updateBookingItem(item.itemId, { driverPhone: e.target.value })} /></div><div className="grid md:grid-cols-4 gap-2"><Input type="number" placeholder="Supplier Rate (GHS)" value={item.supplierRate} onChange={(e) => updateBookingItem(item.itemId, { supplierRate: e.target.value })} /><Input type="number" placeholder="MAALVILA Admin Charge (GHS)" value={item.adminCharge} onChange={(e) => updateBookingItem(item.itemId, { adminCharge: e.target.value })} /><select className="border rounded-lg p-2 text-sm h-10" value={item.clientVatMode || getDefaultClientVatMode(companyProfile)} onChange={(e) => updateBookingItem(item.itemId, { clientVatMode: e.target.value })}><option value="exclusive">VAT Exclusive - add tax on top</option><option value="inclusive">VAT Inclusive - extract tax from rate</option><option value="none">No VAT / VAT not required</option><option value="exempt">VAT Exempt client</option></select><div className="text-sm p-2 border rounded-lg bg-slate-50">Client Daily: <b>{currencyGH(computed.clientDailyRate)}</b></div></div><div className="grid md:grid-cols-5 gap-2"><select className="border rounded-lg p-2 text-sm h-10" value={item.discountType} onChange={(e) => updateBookingItem(item.itemId, { discountType: e.target.value, discountValue: e.target.value === "none" ? "" : item.discountValue })}><option value="none">No Discount</option><option value="fixed">Fixed Amount (GHS)</option><option value="percentage">Percentage of Client Gross (%)</option></select><Input type="number" placeholder={item.discountType === "fixed" ? "Discount Amount (GHS), e.g. 120" : item.discountType === "percentage" ? "Discount Rate %, e.g. 5" : "No Discount"} value={item.discountValue} disabled={item.discountType === "none"} onChange={(e) => updateBookingItem(item.itemId, { discountValue: e.target.value })} /><Input type="number" placeholder="Supplier Share %" value={item.supplierDiscountSharePct} onChange={(e) => updateBookingItem(item.itemId, { supplierDiscountSharePct: e.target.value })} /><Input type="number" placeholder="MAALVILA Share %" value={item.adminDiscountSharePct} onChange={(e) => updateBookingItem(item.itemId, { adminDiscountSharePct: e.target.value })} /><div className="text-xs p-2 border rounded-lg bg-slate-50">Shares: {Number(item.supplierDiscountSharePct || 0) + Number(item.adminDiscountSharePct || 0)}%</div></div><div className="border rounded-xl p-2 bg-white"><div className="text-sm font-medium flex items-center gap-2 mb-2"><CalendarDays className="w-4 h-4" />Trip Days for this car line</div><div className="inline-block border rounded-xl p-2 bg-white"><Calendar mode="multiple" selected={normalizeSelectedDates(item.selectedDates)} onSelect={(dates) => updateBookingItem(item.itemId, { selectedDates: normalizeSelectedDates(dates) })} className="rounded-lg" /></div><div className="text-xs text-gray-500 mt-2">Selected: {normalizeSelectedDates(item.selectedDates).map(toISODateString).join(", ") || "None"}</div></div><div className="grid md:grid-cols-4 gap-2 text-xs text-gray-700"><div className="p-2 rounded-lg bg-blue-50 border">Client Gross: <b>{currencyGH(computed.grossClientAmount)}</b><br />Discount: <b>{currencyGH(computed.discountAmount)}</b><br />Client Net: <b>{currencyGH(computed.netClientAmount)}</b></div><div className="p-2 rounded-lg bg-indigo-50 border">VAT Treatment: <b>{clientVatModeLabel(computed.clientVatMode)}</b><br />Tax: <b>{currencyGH(computed.taxAmount)}</b><br />Client Grand: <b>{currencyGH(computed.clientGrandTotal)}</b></div><div className="p-2 rounded-lg bg-rose-50 border">Supplier Gross: <b>{currencyGH(computed.grossSupplierAmount)}</b><br />Discount Share: <b>{currencyGH(computed.supplierDiscountShare)}</b><br />Payable: <b>{currencyGH(computed.netSupplierPayable)}</b></div><div className="p-2 rounded-lg bg-emerald-50 border">Admin Gross: <b>{currencyGH(computed.grossAdminAmount)}</b><br />Discount Share: <b>{currencyGH(computed.adminDiscountShare)}</b><br />Admin Income: <b>{currencyGH(computed.netAdminIncome)}</b></div></div></CardContent></Card>; })}</div>
+<Card className="rounded-2xl bg-slate-50 border-slate-200">
+  <CardContent className="p-4 space-y-3">
+    <div>
+      <h3 className="font-semibold text-sm">Booking Options / Special Instructions</h3>
+      <p className="text-xs text-gray-500">Use this section for long-term hire, weekend billing treatment, fuel billing and client-specific notes.</p>
+    </div>
+
+    <div className="grid md:grid-cols-3 gap-2">
+      <div>
+        <label className="text-xs text-gray-600">Hire Type</label>
+        <select className="border rounded-lg p-2 text-sm h-10 w-full" value={hireType} onChange={(e) => setHireType(e.target.value)}>
+          <option value="short_term">Short-term hire</option>
+          <option value="long_term">Long-term hire</option>
+        </select>
+      </div>
+
+      <div>
+        <label className="text-xs text-gray-600">Long-Term Period</label>
+        <select className="border rounded-lg p-2 text-sm h-10 w-full" value={longTermPeriod} onChange={(e) => setLongTermPeriod(e.target.value)} disabled={hireType !== "long_term"}>
+          <option value="">Not applicable</option>
+          <option value="3_months">3 months</option>
+          <option value="5_months">5 months</option>
+          <option value="1_year">1 year</option>
+          <option value="2_years">2 years</option>
+          <option value="5_years">5 years</option>
+          <option value="custom">Custom period</option>
+        </select>
+      </div>
+
+      <div>
+        <label className="text-xs text-gray-600">Custom Long-Term Period</label>
+        <Input value={customLongTermPeriod} onChange={(e) => setCustomLongTermPeriod(e.target.value)} placeholder="e.g. 18 months, 4 years" disabled={hireType !== "long_term" || longTermPeriod !== "custom"} />
+      </div>
+    </div>
+
+    <div className="grid md:grid-cols-3 gap-2">
+      <div>
+        <label className="text-xs text-gray-600">Weekend Billing</label>
+        <select className="border rounded-lg p-2 text-sm h-10 w-full" value={weekendBillingMode} onChange={(e) => setWeekendBillingMode(e.target.value)}>
+          <option value="include_all">Include all weekends</option>
+          <option value="exclude_all">Exclude all weekends</option>
+          <option value="selected_only">Include selected weekends only</option>
+        </select>
+      </div>
+
+      <div className="md:col-span-2">
+        <label className="text-xs text-gray-600">Selected Weekend Dates to Include</label>
+        <Input value={selectedWeekendDates} onChange={(e) => setSelectedWeekendDates(e.target.value)} placeholder="Example: 2026-07-25, 2026-07-26" disabled={weekendBillingMode !== "selected_only"} />
+      </div>
+    </div>
+
+    <div className="grid md:grid-cols-3 gap-2">
+      <div>
+        <label className="text-xs text-gray-600">Fuel on Client Invoice</label>
+        <select className="border rounded-lg p-2 text-sm h-10 w-full" value={includeFuelOnInvoice ? "yes" : "no"} onChange={(e) => setIncludeFuelOnInvoice(e.target.value === "yes")}>
+          <option value="no">Do not include fuel on invoice</option>
+          <option value="yes">Include fuel on invoice</option>
+        </select>
+      </div>
+
+      <div>
+        <label className="text-xs text-gray-600">Fuel Invoice Amount (GHS)</label>
+        <Input type="number" value={fuelInvoiceAmount} onChange={(e) => setFuelInvoiceAmount(e.target.value)} placeholder="0.00" disabled={!includeFuelOnInvoice} />
+      </div>
+
+      <div>
+        <label className="text-xs text-gray-600">Fuel Invoice Description</label>
+        <Input value={fuelInvoiceDescription} onChange={(e) => setFuelInvoiceDescription(e.target.value)} placeholder="Fuel billed to client" disabled={!includeFuelOnInvoice} />
+      </div>
+    </div>
+
+    <div>
+      <label className="text-xs text-gray-600">Comments / Special Instructions</label>
+      <textarea
+        className="border rounded-lg p-2 text-sm w-full min-h-[90px]"
+        value={bookingComments}
+        onChange={(e) => setBookingComments(e.target.value)}
+        placeholder="Enter client requests, operational notes, long-term hire arrangements, special instructions, or follow-up comments."
+      />
+    </div>
+  </CardContent>
+</Card>
+<Card className="rounded-xl bg-slate-900 text-white"><CardContent className="p-3 grid md:grid-cols-4 gap-2 text-sm"><div>Client Gross: <b>{currencyGH(formTotals.totalGrossClientAmount)}</b></div><div>Total Discount: <b>{currencyGH(formTotals.totalDiscountAmount)}</b></div><div>Client Net: <b>{currencyGH(formTotals.totalNetClientAmount)}</b></div><div>Fuel on Invoice: <b>{includeFuelOnInvoice ? currencyGH(clampMoney(fuelInvoiceAmount)) : "Not included"}</b></div><div>Complete Total: <b>{currencyGH(computeBookingCompleteTotalAmountFromTotals(formTotals, includeFuelOnInvoice, fuelInvoiceAmount))}</b></div><div>VAT/NHIL/GETFund: <b>{currencyGH(formVatSummary.totalTax)}</b></div><div>Client Grand Total: <b>{currencyGH(formVatSummary.grandTotal)}</b></div><div>Supplier Payable: <b>{currencyGH(formTotals.totalNetSupplierPayable)}</b></div><div>Admin Income: <b>{currencyGH(formTotals.totalNetAdminIncome)}</b></div></CardContent></Card><div className="flex flex-wrap gap-2"><Button onClick={saveBooking}>{editBookingId ? "Update Booking" : "Save Multi-Car Booking"}</Button>{editBookingId && <Button variant="outline" onClick={resetBookingForm}>Cancel Edit</Button>}</div></> : <div className="text-sm text-gray-500">You do not have permission to add bookings.</div>}</CardContent></Card><Card className="rounded-2xl shadow"><CardContent className="p-4 space-y-3"><div className="flex flex-col md:flex-row md:items-center md:justify-between gap-2"><h2 className="text-lg font-semibold">Filter / Export</h2><div className="text-xs text-gray-500">Showing <b>{filteredBookings.length}</b> / {bookings.length} bookings</div></div><div className="grid md:grid-cols-7 gap-2"><select className="border rounded-lg p-2 text-sm h-10" value={filterCar} onChange={(e) => setFilterCar(e.target.value)}><option value="">All Cars</option>{cars.map((c) => <option key={c.id} value={c.number}>{c.name} ({c.number})</option>)}</select><select className="border rounded-lg p-2 text-sm h-10" value={filterSource} onChange={(e) => setFilterSource(e.target.value)}><option value="">All Sources</option>{sources.map((s) => <option key={s.id} value={s.id}>{s.sourceName} — {sourceTypeLabel(s.sourceType)}</option>)}</select><select className="border rounded-lg p-2 text-sm h-10" value={filterStatus} onChange={(e) => setFilterStatus(e.target.value)}><option value="">All Statuses</option><option value="pending">Pending</option><option value="confirmed">Confirmed</option><option value="cancelled">Cancelled</option></select><Input type="date" value={filterStartDate} onChange={(e) => setFilterStartDate(e.target.value)} /><Input type="date" value={filterEndDate} onChange={(e) => setFilterEndDate(e.target.value)} /><Button onClick={exportCSV} disabled={!can(role, "export")}>Export CSV</Button><Button onClick={() => window.print()} variant="outline" disabled={!can(role, "export")}>Print</Button></div></CardContent></Card><Card className="rounded-2xl"><CardContent className="p-4"><h2 className="text-lg font-semibold mb-3">Bookings</h2><div className="space-y-3">{filteredBookings.map((b) => { const items = getBookingItems(b, cars); const totals = getBookingTotals(b, cars); const total = computeBookingTotalAmount(b, cars); const paid = clampMoney(b.amountPaid || 0); const balance = Math.max(0, total - paid); const payStatus = b.paymentStatus || computePaymentStatus(total, paid); const statusClass = b.status === "confirmed" ? "text-green-700 bg-green-50 border-green-200" : b.status === "pending" ? "text-yellow-800 bg-yellow-50 border-yellow-200" : "text-red-700 bg-red-50 border-red-200"; const payClass = payStatus === "paid" ? "text-emerald-800 bg-emerald-50 border-emerald-200" : payStatus === "partial" ? "text-violet-800 bg-violet-50 border-violet-200" : "text-slate-700 bg-slate-50 border-slate-200"; const supplierSources = Array.from(new Set(items.map((i) => i.sourceId).filter(Boolean))); return <div key={b.id} className="border rounded-2xl p-3 bg-white hover:shadow-sm transition"><div className="flex flex-col md:flex-row md:items-start md:justify-between gap-2"><div className="space-y-2 flex-1"><div className="font-semibold text-lg">{b.customer}</div><div className="text-sm text-gray-700">Routes Summary: <b>{Array.from(new Set(items.map((i) => `${i.travelFrom || "—"} → ${i.travelTo || "—"}`))).join(" | ")}</b></div><div className="text-sm text-gray-700">Contact: <b>{b.customerEmail || "—"}</b>{b.customerPhone ? <span> • {b.customerPhone}</span> : null}</div><div className="text-sm text-gray-700">Booking Dates Summary: <span className="font-medium">{computeBookingDateSummary(items).map(toISODateString).join(", ")}</span></div><div className="overflow-auto"><table className="w-full text-xs border"><thead><tr className="bg-slate-50 text-left"><th className="p-2">Car</th><th className="p-2">Route</th><th className="p-2">Driver</th><th className="p-2">Dates</th><th className="p-2">Source</th><th className="p-2 text-right">Supplier Payable</th><th className="p-2 text-right">Admin Income</th><th className="p-2 text-right">Client Net</th></tr></thead><tbody>{items.map((i) => <tr key={i.itemId} className="border-t"><td className="p-2"><b>{i.carName}</b> ({i.carNumber})</td><td className="p-2">{i.travelFrom || "—"} → {i.travelTo || "—"}</td><td className="p-2">{i.driver || "—"}{i.driverPhone ? ` (${i.driverPhone})` : ""}</td><td className="p-2">{normalizeSelectedDates(i.selectedDates).map(toISODateString).join(", ")}</td><td className="p-2">{i.sourceName || "—"}</td><td className="p-2 text-right">{currencyGH(i.netSupplierPayable)}</td><td className="p-2 text-right">{currencyGH(i.netAdminIncome)}</td><td className="p-2 text-right font-medium">{currencyGH(i.netClientAmount)}</td></tr>)}</tbody></table></div><div className="flex flex-wrap gap-2 text-sm"><span className={`inline-flex items-center px-2 py-1 border rounded-xl text-xs ${statusClass}`}>Status: {b.status || "pending"}</span><span className={`inline-flex items-center px-2 py-1 border rounded-xl text-xs ${payClass}`}>Payment: {payStatus}</span><span className="inline-flex items-center px-2 py-1 border rounded-xl text-xs bg-slate-50">Vehicle Lines: {items.length}</span></div><div className="grid md:grid-cols-3 gap-2 text-xs"><div className="p-2 rounded-lg bg-blue-50 border">Client Gross: <b>{currencyGH(totals.totalGrossClientAmount)}</b><br />Discount: <b>{currencyGH(totals.totalDiscountAmount)}</b><br />Client Net: <b>{currencyGH(totals.totalNetClientAmount)}</b></div><div className="p-2 rounded-lg bg-rose-50 border">Supplier Payable: <b>{currencyGH(totals.totalNetSupplierPayable)}</b></div><div className="p-2 rounded-lg bg-emerald-50 border">Admin Income: <b>{currencyGH(totals.totalNetAdminIncome)}</b><br />Paid: <b>{currencyGH(paid)}</b><br />Balance: <b>{currencyGH(balance)}</b> {b.includeFuelOnInvoice && <span className="ml-2 text-xs text-blue-700">Fuel included: {currencyGH(getBookingFuelInvoiceAmount(b))}</span>}</div></div></div><div className="flex flex-wrap gap-2 md:justify-end">{can(role, "confirmBooking") && b.status === "pending" && <Button onClick={() => confirmBooking(b)}>Confirm</Button>}{can(role, "cancelBooking") && b.status !== "cancelled" && <Button variant="destructive" onClick={() => cancelBooking(b)}>Cancel</Button>}{can(role, "editBooking") && <Button variant="outline" onClick={() => editBooking(b)}>Edit</Button>}{can(role, "recordPayment") && <Button variant="outline" onClick={() => openPayment(b)}>Record Payment</Button>}{can(role, "recordSupplierPayment") && <Button variant="outline" className="gap-2" onClick={() => openSupplierPayment(b)}><Banknote className="w-4 h-4" /> Supplier Payment</Button>}<Button variant="outline" className="gap-2" onClick={() => openQuotation(b)}><ScrollText className="w-4 h-4" /> Quote</Button><Button variant="outline" className="gap-2" onClick={() => openInvoice(b)}><FileText className="w-4 h-4" /> Invoice</Button><Button variant="outline" className="gap-2" onClick={() => openReceipt(b)}><ReceiptText className="w-4 h-4" /> Receipt</Button>{supplierSources.length > 0 && <Button variant="outline" className="gap-2" onClick={() => openSupplierRequest(b)}><UsersRound className="w-4 h-4" /> Supplier Request</Button>}<Button variant="outline" className="gap-2 border-blue-300 text-blue-700" onClick={() => openSupplierResponse(b)}><UsersRound className="w-4 h-4" /> Supplier Response</Button>{supplierSources.length > 0 && <Button variant="outline" className="gap-2" onClick={() => openSupplierVoucher(b)}><ReceiptText className="w-4 h-4" /> Supplier Voucher</Button>}{supplierSources.length > 0 && <Button variant="outline" className="gap-2" onClick={() => openSupplierStatement(b)}><UsersRound className="w-4 h-4" /> Supplier Statement</Button>}</div></div></div>; })}{!filteredBookings.length && <div className="text-sm text-gray-500">No bookings match your filter.</div>}</div></CardContent></Card>{paymentOpen && paymentBooking && <Card className="rounded-2xl border-2"><CardContent className="p-4 space-y-3"><div className="flex items-center justify-between"><h2 className="text-lg font-semibold">Record Payment</h2><Button variant="outline" onClick={() => setPaymentOpen(false)}>Close</Button></div><div className="text-sm text-gray-700">Booking: <b>{paymentBooking.customer}</b> • Client Net: <b>{currencyGH(computeBookingTotalAmount(paymentBooking, cars))}</b></div><div className="grid md:grid-cols-5 gap-2"><Input type="number" placeholder="Amount (GH₵)" value={paymentAmount} onChange={(e) => setPaymentAmount(e.target.value)} /><select className="border rounded-lg p-2 text-sm h-10" value={paymentMethod} onChange={(e) => setPaymentMethod(e.target.value)}><option value="cash">Cash</option><option value="momo">MoMo</option><option value="bank">Bank</option><option value="card">Card</option></select><Input placeholder="Reference" value={paymentReference} onChange={(e) => setPaymentReference(e.target.value)} /><Input placeholder="Note" value={paymentNote} onChange={(e) => setPaymentNote(e.target.value)} /><Button onClick={recordPayment}>Save Payment</Button></div><div><h3 className="font-semibold text-sm mb-2">Payment History</h3>{paymentHistory.map((p) => <div key={p.id} className="text-sm border rounded-xl p-2 bg-white mb-2"><div className="font-medium">{currencyGH(p.amount)} • {p.method || "cash"}{p.reference ? ` • Ref: ${p.reference}` : ""}</div>{p.note ? <div className="text-xs text-gray-600">{p.note}</div> : null}<div className="text-xs text-gray-500">{safeTimeToLocaleString(p.paidAt)} • by {p.recordedByEmail || "unknown"}</div></div>)}{!paymentHistory.length && <div className="text-sm text-gray-500">No payments recorded yet.</div>}</div></CardContent></Card>}{supplierPaymentOpen && supplierPaymentBooking && <Card className="rounded-2xl border-2 border-rose-200"><CardContent className="p-4 space-y-3"><div className="flex items-center justify-between"><h2 className="text-lg font-semibold">Record Supplier Payment</h2><Button variant="outline" onClick={() => setSupplierPaymentOpen(false)}>Close</Button></div><div className="text-sm text-gray-700">Booking: <b>{supplierPaymentBooking.customer}</b></div><div className="grid md:grid-cols-6 gap-2"><select className="border rounded-lg p-2 text-sm h-10" value={supplierPaymentSourceId} onChange={(e) => setSupplierPaymentSourceId(e.target.value)}><option value="">Select Supplier</option>{Array.from(new Set(getBookingItems(supplierPaymentBooking, cars).map((i) => i.sourceId).filter(Boolean))).map((sid) => { const s = sources.find((x) => x.id === sid); return <option key={sid} value={sid}>{s?.sourceName || sid}</option>; })}</select><Input type="number" placeholder="Supplier Payment Amount (GHS)" value={supplierPaymentAmount} onChange={(e) => setSupplierPaymentAmount(e.target.value)} /><select className="border rounded-lg p-2 text-sm h-10" value={supplierPaymentMethod} onChange={(e) => setSupplierPaymentMethod(e.target.value)}><option value="cash">Cash</option><option value="momo">MoMo</option><option value="bank">Bank</option><option value="card">Card</option></select><Input placeholder="Reference" value={supplierPaymentReference} onChange={(e) => setSupplierPaymentReference(e.target.value)} /><Input placeholder="Note" value={supplierPaymentNote} onChange={(e) => setSupplierPaymentNote(e.target.value)} /><Button onClick={recordSupplierPayment}>Save Supplier Payment</Button></div><div><h3 className="font-semibold text-sm mb-2">Supplier Payment History</h3>{supplierPaymentHistory.filter((p) => !supplierPaymentSourceId || String(p.sourceId || "") === String(supplierPaymentSourceId)).map((p) => <div key={p.id} className="text-sm border rounded-xl p-2 bg-white mb-2"><div className="font-medium">{p.sourceName ? `${p.sourceName} • ` : ""}{currencyGH(p.amount)} • {p.method || "cash"}{p.reference ? ` • Ref: ${p.reference}` : ""}</div>{p.note ? <div className="text-xs text-gray-600">{p.note}</div> : null}<div className="text-xs text-gray-500">{safeTimeToLocaleString(p.paidAt)} • by {p.recordedByEmail || "unknown"}</div></div>)}{!supplierPaymentHistory.filter((p) => !supplierPaymentSourceId || String(p.sourceId || "") === String(supplierPaymentSourceId)).length && <div className="text-sm text-gray-500">No supplier payments recorded yet.</div>}</div></CardContent></Card>}</>}
 
     {activeView === "documents" && <>{!quotationOpen && !invoiceOpen && !receiptOpen && !supplierRequestOpen && !supplierResponseOpen && !supplierVoucherOpen && !supplierStatementOpen && <Card className="rounded-2xl shadow"><CardContent className="p-4 text-sm text-gray-600">Open the <b>Bookings</b> tab and click <b>Quote</b>, <b>Invoice</b>, <b>Receipt</b>, <b>Supplier Request</b>, <b>Supplier Response</b>, <b>Supplier Voucher</b>, or <b>Supplier Statement</b> on a booking to generate a document. Supplier Response is now shown as a booking action button.</CardContent></Card>}{quotationOpen && quotationBooking && <Card className="rounded-2xl border-2"><CardContent className="p-4 space-y-3"><div className="flex items-center justify-between"><h2 className="text-lg font-semibold">Quotation Generator</h2><Button variant="outline" onClick={() => setQuotationOpen(false)}>Close</Button></div><div className="grid md:grid-cols-3 gap-2"><Input placeholder="Quotation Number" value={quotationNumber} onChange={(e) => setQuotationNumber(e.target.value)} /><Input placeholder="Quotation notes / terms" value={quotationNotes} onChange={(e) => setQuotationNotes(e.target.value)} /><Button onClick={saveQuotationToAudit}>Save + Email Quote</Button></div><ClientDocumentPreview type="Quotation" number={quotationNumber} booking={quotationBooking} notes={quotationNotes} /></CardContent></Card>}{invoiceOpen && invoiceBooking && <Card className="rounded-2xl border-2"><CardContent className="p-4 space-y-3"><div className="flex items-center justify-between"><h2 className="text-lg font-semibold">Invoice Generator</h2><Button variant="outline" onClick={() => setInvoiceOpen(false)}>Close</Button></div><div className="grid md:grid-cols-3 gap-2"><Input placeholder="Invoice Number" value={invoiceNumber} onChange={(e) => setInvoiceNumber(e.target.value)} /><Input placeholder="Notes / footer" value={invoiceNotes} onChange={(e) => setInvoiceNotes(e.target.value)} /><Button onClick={saveInvoiceToAudit}>Save + Email Invoice</Button></div><ClientDocumentPreview type="Invoice" number={invoiceNumber} booking={invoiceBooking} notes={invoiceNotes} /></CardContent></Card>}{receiptOpen && receiptBooking && <Card className="rounded-2xl border-2"><CardContent className="p-4 space-y-3"><div className="flex items-center justify-between"><h2 className="text-lg font-semibold">Receipt Generator</h2><Button variant="outline" onClick={() => setReceiptOpen(false)}>Close</Button></div><div className="grid md:grid-cols-3 gap-2"><Input placeholder="Receipt Number" value={receiptNumber} onChange={(e) => setReceiptNumber(e.target.value)} /><Input placeholder="Receipt notes / footer" value={receiptNotes} onChange={(e) => setReceiptNotes(e.target.value)} /><Button onClick={saveReceiptToAudit}>Save + Email Receipt</Button></div><ClientDocumentPreview type="Receipt" number={receiptNumber} booking={receiptBooking} notes={receiptNotes} /></CardContent></Card>}{supplierRequestOpen && supplierRequestBooking && <Card className="rounded-2xl border-2"><CardContent className="p-4 space-y-3"><div className="flex items-center justify-between"><h2 className="text-lg font-semibold">Supplier Request Generator</h2><Button variant="outline" onClick={() => setSupplierRequestOpen(false)}>Close</Button></div><div className="grid md:grid-cols-4 gap-2"><Input placeholder="Request Number" value={supplierRequestNumber} onChange={(e) => setSupplierRequestNumber(e.target.value)} /><select className="border rounded-lg p-2 text-sm h-10" value={supplierRequestSourceId} onChange={(e) => setSupplierRequestSourceId(e.target.value)}>{Array.from(new Set(getBookingItems(supplierRequestBooking, cars).map((i) => i.sourceId).filter(Boolean))).map((sid) => { const s = sources.find((x) => x.id === sid); return <option key={sid} value={sid}>{s?.sourceName || sid}</option>; })}</select><Input placeholder="Request notes" value={supplierRequestNotes} onChange={(e) => setSupplierRequestNotes(e.target.value)} /><Button onClick={saveSupplierRequestToAudit}>Save + Email Supplier Request</Button></div><SupplierRequestPreview booking={supplierRequestBooking} sourceId={supplierRequestSourceId} number={supplierRequestNumber} notes={supplierRequestNotes} /></CardContent></Card>}{supplierResponseOpen && supplierResponseBooking && <Card className="rounded-2xl border-2"><CardContent className="p-4 space-y-3"><div className="flex items-center justify-between"><h2 className="text-lg font-semibold">Supplier Response Capture</h2><Button variant="outline" onClick={() => setSupplierResponseOpen(false)}>Close</Button></div><div className="grid md:grid-cols-4 gap-2"><Input placeholder="Response Number" value={supplierResponseNumber} onChange={(e) => setSupplierResponseNumber(e.target.value)} /><select className="border rounded-lg p-2 text-sm h-10" value={supplierResponseSourceId} onChange={(e) => { const sourceId = e.target.value; setSupplierResponseSourceId(sourceId); const items = getBookingItems(supplierResponseBooking, cars).filter((i) => i.sourceId === sourceId); setSupplierResponseLines(items.map((i) => ({ itemId: i.itemId, requestedCarName: i.carName || "", requestedCarNumber: i.carNumber || "", confirmedCarName: i.confirmedCarName || i.supplierConfirmedCarName || "", confirmedCarNumber: i.confirmedCarNumber || i.supplierConfirmedCarNumber || "", confirmedDriverName: i.confirmedDriverName || i.supplierConfirmedDriverName || i.driver || "", confirmedDriverPhone: i.confirmedDriverPhone || i.supplierConfirmedDriverPhone || i.driverPhone || "", confirmedSupplierRate: i.confirmedSupplierRate || i.supplierConfirmedRate || i.supplierRate || "", responseStatus: i.supplierResponseStatus || "confirmed", supplierNotes: i.supplierResponseNotes || "" }))); }}>{Array.from(new Set(getBookingItems(supplierResponseBooking, cars).map((i) => i.sourceId).filter(Boolean))).map((sid) => { const s = sources.find((x) => x.id === sid); return <option key={sid} value={sid}>{s?.sourceName || sid}</option>; })}</select><Input placeholder="General response notes" value={supplierResponseNotes} onChange={(e) => setSupplierResponseNotes(e.target.value)} /><Button onClick={saveSupplierResponseToAudit}>Save Supplier Response</Button></div><SupplierResponseCapture booking={supplierResponseBooking} sourceId={supplierResponseSourceId} number={supplierResponseNumber} notes={supplierResponseNotes} /></CardContent></Card>}{supplierVoucherOpen && supplierVoucherBooking && <Card className="rounded-2xl border-2"><CardContent className="p-4 space-y-3"><div className="flex items-center justify-between"><h2 className="text-lg font-semibold">Supplier Settlement Voucher</h2><Button variant="outline" onClick={() => setSupplierVoucherOpen(false)}>Close</Button></div><div className="grid md:grid-cols-4 gap-2"><Input placeholder="Voucher Number" value={supplierVoucherNumber} onChange={(e) => setSupplierVoucherNumber(e.target.value)} /><select className="border rounded-lg p-2 text-sm h-10" value={supplierVoucherSourceId} onChange={(e) => setSupplierVoucherSourceId(e.target.value)}>{Array.from(new Set(getBookingItems(supplierVoucherBooking, cars).map((i) => i.sourceId).filter(Boolean))).map((sid) => { const s = sources.find((x) => x.id === sid); return <option key={sid} value={sid}>{s?.sourceName || sid}</option>; })}</select><Input placeholder="Voucher notes" value={supplierVoucherNotes} onChange={(e) => setSupplierVoucherNotes(e.target.value)} /><Button onClick={saveSupplierVoucherToAudit}>Save Supplier Voucher</Button></div><SupplierVoucherPreview booking={supplierVoucherBooking} sourceId={supplierVoucherSourceId} number={supplierVoucherNumber} notes={supplierVoucherNotes} /></CardContent></Card>}{supplierStatementOpen && supplierStatementBooking && <Card className="rounded-2xl border-2"><CardContent className="p-4 space-y-3"><div className="flex items-center justify-between"><h2 className="text-lg font-semibold">Supplier Statement Generator</h2><Button variant="outline" onClick={() => setSupplierStatementOpen(false)}>Close</Button></div><div className="grid md:grid-cols-3 gap-2"><Input placeholder="Statement Number" value={supplierStatementNumber} onChange={(e) => setSupplierStatementNumber(e.target.value)} /><select className="border rounded-lg p-2 text-sm h-10" value={supplierStatementSourceId} onChange={(e) => setSupplierStatementSourceId(e.target.value)}>{Array.from(new Set(getBookingItems(supplierStatementBooking, cars).map((i) => i.sourceId).filter(Boolean))).map((sid) => { const s = sources.find((x) => x.id === sid); return <option key={sid} value={sid}>{s?.sourceName || sid}</option>; })}</select><Button onClick={saveSupplierStatementToAudit}>Save Supplier Statement</Button></div><SupplierStatementPreview booking={supplierStatementBooking} sourceId={supplierStatementSourceId} number={supplierStatementNumber} /></CardContent></Card>}</>}
 
