@@ -650,6 +650,38 @@ function computeBookingTotalAmount(b, cars = []) {
 function computeClientDocumentFinalTotal(vatSummary, booking) {
   return clampMoney(vatSummary?.grandTotal || 0) + getBookingFuelInvoiceAmount(booking);
 }
+// phase3w-b-report-period-filters
+function parseReportPeriodDate(value, endOfDay = false) {
+  if (!value) return null;
+  const d = new Date(value);
+  if (Number.isNaN(d.getTime())) return null;
+  if (endOfDay) d.setHours(23, 59, 59, 999);
+  else d.setHours(0, 0, 0, 0);
+  return d;
+}
+
+function bookingMatchesReportPeriod(booking, cars = [], startValue = '', endValue = '') {
+  const start = parseReportPeriodDate(startValue, false);
+  const end = parseReportPeriodDate(endValue, true);
+  if (!start && !end) return true;
+
+  const items = getBookingItems(booking, cars);
+  const dates = computeBookingDateSummary(items, booking?.selectedDates);
+  const candidateDates = dates.length
+    ? dates
+    : [toDateSafe(booking?.createdAt), toDateSafe(booking?.updatedAt), toDateSafe(booking?.paymentUpdatedAt)].filter(Boolean);
+
+  if (!candidateDates.length) return true;
+
+  return candidateDates.some((d) => {
+    if (!(d instanceof Date)) return false;
+    const clean = new Date(d.getFullYear(), d.getMonth(), d.getDate());
+    if (start && clean < start) return false;
+    if (end && clean > end) return false;
+    return true;
+  });
+}
+
 function computePaymentStatus(total, paid) {
   const t = clampMoney(total), p = clampMoney(paid);
   if (t <= 0 || p <= 0) return "unpaid";
@@ -779,6 +811,8 @@ export default function Dashboard() {
   const [supplierLedgerSearch, setSupplierLedgerSearch] = useState("");
   const [profitabilitySearch, setProfitabilitySearch] = useState("");
   const [fuelClaimsSearch, setFuelClaimsSearch] = useState("");
+  const [reportStartDate, setReportStartDate] = useState("");
+  const [reportEndDate, setReportEndDate] = useState("");
 
   const [companyProfile, setCompanyProfile] = useState(DEFAULT_COMPANY_PROFILE);
   const [savingProfile, setSavingProfile] = useState(false);
@@ -933,6 +967,10 @@ export default function Dashboard() {
   const formTotals = useMemo(() => computePricingTotals(formItemsComputed), [formItemsComputed]);
   const formVatSummary = useMemo(() => computeBookingVatSummaryFromItems(formItemsComputed), [formItemsComputed]);
 
+  const reportFilteredBookings = useMemo(() => {
+    return bookings.filter((booking) => bookingMatchesReportPeriod(booking, cars, reportStartDate, reportEndDate));
+  }, [bookings, cars, reportStartDate, reportEndDate]);
+
   const customerDirectory = useMemo(() => {
     const map = new Map();
     const sortedBookings = [...bookings].sort((a, b) => (toDateSafe(b.createdAt)?.getTime?.() || 0) - (toDateSafe(a.createdAt)?.getTime?.() || 0));
@@ -955,7 +993,7 @@ export default function Dashboard() {
 
   const customerLedgerRows = useMemo(() => {
     const map = new Map();
-    for (const b of bookings) {
+    for (const b of reportFilteredBookings) {
       const name = String(b.customer || "").trim();
       if (!name) continue;
       const key = name.toLowerCase();
@@ -1018,7 +1056,7 @@ export default function Dashboard() {
       carNumbersText: Array.from(row.carNumbers).join(", "),
       routesText: Array.from(row.routes).join(" | "),
     })).sort((a, b) => a.customerName.localeCompare(b.customerName));
-  }, [bookings, cars]);
+  }, [reportFilteredBookings, cars]);
 
   const filteredCustomerLedgerRows = useMemo(() => {
     const q = customerLedgerSearch.trim().toLowerCase();
@@ -1065,7 +1103,7 @@ export default function Dashboard() {
       });
     }
 
-    for (const booking of bookings) {
+    for (const booking of reportFilteredBookings) {
       const bookingItems = getBookingItems(booking, cars);
       const bookingDate = toDateSafe(booking.updatedAt) || toDateSafe(booking.createdAt) || null;
 
@@ -1143,7 +1181,7 @@ export default function Dashboard() {
       carNamesText: Array.from(row.carNames).filter(Boolean).join(" | "),
       routesText: Array.from(row.routes).filter(Boolean).join(" | "),
     })).sort((a, b) => b.balance - a.balance || b.netPayable - a.netPayable || String(a.sourceName).localeCompare(String(b.sourceName)));
-  }, [sources, cars, bookings, audit]);
+  }, [sources, cars, reportFilteredBookings, audit]);
 
   const filteredSupplierLedgerRows = useMemo(() => {
     const q = supplierLedgerSearch.trim().toLowerCase();
@@ -1325,7 +1363,7 @@ export default function Dashboard() {
   }, [cars, sources]);
 
   const clientBalanceRows = useMemo(() => {
-    return bookings
+    return reportFilteredBookings
       .filter((booking) => booking.status !== "cancelled")
       .map((booking) => {
         const total = computeBookingTotalAmount(booking, cars);
@@ -1345,11 +1383,11 @@ export default function Dashboard() {
         };
       })
       .sort((a, b) => b.balance - a.balance);
-  }, [bookings, cars]);
+  }, [reportFilteredBookings, cars]);
 
   const supplierPayableRows = useMemo(() => {
     const map = new Map();
-    for (const booking of bookings) {
+    for (const booking of reportFilteredBookings) {
       if (booking.status !== "confirmed") continue;
       for (const item of getBookingItems(booking, cars)) {
         if (!item.sourceId) continue;
@@ -1372,11 +1410,11 @@ export default function Dashboard() {
       }
     }
     return Array.from(map.values()).sort((a, b) => b.netPayable - a.netPayable);
-  }, [bookings, cars]);
+  }, [reportFilteredBookings, cars]);
 
   const monthlyRevenueRows = useMemo(() => {
     const map = new Map();
-    for (const booking of bookings) {
+    for (const booking of reportFilteredBookings) {
       if (booking.status !== "confirmed") continue;
       const created = toDateSafe(booking.createdAt) || toDateSafe(booking.updatedAt) || new Date();
       const monthKey = `${created.getFullYear()}-${String(created.getMonth() + 1).padStart(2, "0")}`;
@@ -1389,7 +1427,7 @@ export default function Dashboard() {
       map.set(monthKey, current);
     }
     return Array.from(map.values()).sort((a, b) => b.monthKey.localeCompare(a.monthKey));
-  }, [bookings, cars]);
+  }, [reportFilteredBookings, cars]);
 
   const reportsSummary = useMemo(() => {
     return {
@@ -1814,7 +1852,7 @@ export default function Dashboard() {
   const tripProfitabilityRows = useMemo(() => {
     const q = profitabilitySearch.trim().toLowerCase();
     const rows = [];
-    for (const booking of bookings) {
+    for (const booking of reportFilteredBookings) {
       if (booking.status === "cancelled") continue;
       for (const item of getBookingItems(booking, cars)) {
         const dates = normalizeSelectedDates(item.selectedDates);
@@ -1876,7 +1914,7 @@ export default function Dashboard() {
       }
     }
     return rows.sort((a, b) => (b.tripProfit - a.tripProfit) || String(a.customer).localeCompare(String(b.customer)));
-  }, [bookings, cars, profitabilitySearch]);
+  }, [reportFilteredBookings, cars, profitabilitySearch]);
 
   const tripProfitabilitySummary = useMemo(() => {
     const totalClientNet = tripProfitabilityRows.reduce((sum, r) => sum + r.clientNet, 0);
@@ -2391,6 +2429,34 @@ export default function Dashboard() {
     link.click();
     document.body.removeChild(link);
   };
+  const renderReportPeriodControls = (title = 'Report Period') => (
+    <Card className="rounded-2xl border bg-white">
+      <CardContent className="p-3 space-y-3">
+        <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-2">
+          <div>
+            <div className="font-semibold">{title}</div>
+            <div className="text-xs text-gray-500">Select a start and end date to view report records for a specific period. Leave both blank to show all records.</div>
+          </div>
+          <Button variant="outline" onClick={() => { setReportStartDate(''); setReportEndDate(''); }}>Clear Period</Button>
+        </div>
+        <div className="grid md:grid-cols-3 gap-2 text-sm">
+          <div>
+            <label className="text-xs text-gray-600">Start Date</label>
+            <Input type="date" value={reportStartDate} onChange={(e) => setReportStartDate(e.target.value)} />
+          </div>
+          <div>
+            <label className="text-xs text-gray-600">End Date</label>
+            <Input type="date" value={reportEndDate} onChange={(e) => setReportEndDate(e.target.value)} />
+          </div>
+          <div className="rounded-xl border bg-slate-50 p-3">
+            <div className="text-xs text-gray-500">Records in Period</div>
+            <div className="text-lg font-bold">{reportFilteredBookings.length}</div>
+          </div>
+        </div>
+      </CardContent>
+    </Card>
+  );
+
   const closeDocumentPanels = () => {
     setQuotationOpen(false);
     setInvoiceOpen(false);
@@ -2978,7 +3044,7 @@ export default function Dashboard() {
       </CardContent></Card>
     </>}
 
-    {activeView === "reports" && <>
+    {activeView === "reports" && <>{renderReportPeriodControls("Management Reports Period")}
       <Card className="rounded-2xl shadow"><CardContent className="p-4 space-y-4"><div className="flex flex-col md:flex-row md:items-center md:justify-between gap-2"><div><h2 className="text-lg font-semibold">Management Reports</h2><div className="text-sm text-gray-600">Summary reports for client balances, supplier payables and confirmed monthly performance. This view does not change the core KPI calculations.</div></div><Button onClick={exportReportsCSV} disabled={!can(role, "export")}>Export Reports CSV</Button></div><div className="grid md:grid-cols-4 gap-3 text-sm"><div className="p-3 rounded-xl border bg-blue-50">Client Outstanding<br /><b className="text-lg">{currencyGH(reportsSummary.clientOutstanding)}</b></div><div className="p-3 rounded-xl border bg-rose-50">Confirmed Balances<br /><b className="text-lg">{reportsSummary.overdueLikeCount}</b></div><div className="p-3 rounded-xl border bg-amber-50">Supplier Payable<br /><b className="text-lg">{currencyGH(reportsSummary.supplierPayable)}</b></div><div className="p-3 rounded-xl border bg-emerald-50">Confirmed Client Net<br /><b className="text-lg">{currencyGH(reportsSummary.monthlyClientNet)}</b></div></div></CardContent></Card>
       <Card className="rounded-2xl shadow"><CardContent className="p-4"><h2 className="text-lg font-semibold mb-3">Client Balances</h2><div className="overflow-auto"><table className="w-full text-sm"><thead><tr className="text-left border-b text-gray-600"><th className="py-2 pr-3">Customer</th><th className="py-2 pr-3">Vehicles</th><th className="py-2 pr-3">Dates</th><th className="py-2 pr-3">Status</th><th className="py-2 pr-3 text-right">Client Net</th><th className="py-2 pr-3 text-right">Paid</th><th className="py-2 pr-3 text-right">Balance</th></tr></thead><tbody>{clientBalanceRows.map((row, idx) => <tr key={`${row.bookingId}-${idx}`} className="border-b"><td className="py-2 pr-3 font-medium">{row.customer}</td><td className="py-2 pr-3 text-xs">{row.vehicles}</td><td className="py-2 pr-3 text-xs">{row.dates || "—"}</td><td className="py-2 pr-3">{row.paymentStatus}</td><td className="py-2 pr-3 text-right">{currencyGH(row.total)}</td><td className="py-2 pr-3 text-right">{currencyGH(row.paid)}</td><td className="py-2 pr-3 text-right font-semibold">{currencyGH(row.balance)}</td></tr>)}{!clientBalanceRows.length && <tr><td colSpan={7} className="py-3 text-gray-500">No client balances available.</td></tr>}</tbody></table></div></CardContent></Card>
       <Card className="rounded-2xl shadow"><CardContent className="p-4"><h2 className="text-lg font-semibold mb-3">Supplier Payables by Source</h2><div className="overflow-auto"><table className="w-full text-sm"><thead><tr className="text-left border-b text-gray-600"><th className="py-2 pr-3">Supplier / Source</th><th className="py-2 pr-3">Type</th><th className="py-2 pr-3 text-right">Vehicle Lines</th><th className="py-2 pr-3 text-right">Gross Supplier</th><th className="py-2 pr-3 text-right">Discount Share</th><th className="py-2 pr-3 text-right">Net Payable</th><th className="py-2 pr-3 text-right">Admin Income</th></tr></thead><tbody>{supplierPayableRows.map((row, idx) => <tr key={`${row.sourceId}-${idx}`} className="border-b"><td className="py-2 pr-3 font-medium">{row.sourceName}</td><td className="py-2 pr-3">{sourceTypeLabel(row.sourceType)}</td><td className="py-2 pr-3 text-right">{row.vehicleLines}</td><td className="py-2 pr-3 text-right">{currencyGH(row.grossSupplier)}</td><td className="py-2 pr-3 text-right">{currencyGH(row.discountShare)}</td><td className="py-2 pr-3 text-right font-semibold">{currencyGH(row.netPayable)}</td><td className="py-2 pr-3 text-right">{currencyGH(row.adminIncome)}</td></tr>)}{!supplierPayableRows.length && <tr><td colSpan={7} className="py-3 text-gray-500">No confirmed supplier payables yet.</td></tr>}</tbody></table></div></CardContent></Card>
@@ -2986,12 +3052,12 @@ export default function Dashboard() {
     </>}
 
 
-    {activeView === "profitability" && <>
+    {activeView === "profitability" && <>{renderReportPeriodControls("Profitability Report Period")}
       <Card className="rounded-2xl shadow"><CardContent className="p-4 space-y-3"><div className="flex flex-col md:flex-row md:items-center md:justify-between gap-2"><div><h2 className="text-lg font-semibold">Trip Profitability</h2><div className="text-sm text-gray-600">Compares client net against supplier payable and applies fuel only when MAALVILA absorbs it. Fuel paid directly by client does not affect MAALVILA profit. Fuel paid by MAALVILA for later billing is tracked as a receivable until reimbursed; it does not reduce trip profit unless management chooses to absorb it as a cost.</div></div><Button onClick={exportTripProfitabilityCSV} disabled={!can(role, "export")}>Export Profitability CSV</Button></div><Input placeholder="Search customer, vehicle, route, driver, source or status" value={profitabilitySearch} onChange={(e) => setProfitabilitySearch(e.target.value)} /><div className="grid sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-3"><Card className="rounded-xl"><CardContent className="p-3"><div className="text-xs text-gray-500">Trip Lines</div><div className="text-base md:text-lg font-bold leading-tight break-words">{tripProfitabilitySummary.totalTrips}</div></CardContent></Card><Card className="rounded-xl"><CardContent className="p-3"><div className="text-xs text-gray-500">Client Net</div><div className="text-base md:text-lg font-bold leading-tight break-words">{currencyGH(tripProfitabilitySummary.totalClientNet)}</div></CardContent></Card><Card className="rounded-xl"><CardContent className="p-3"><div className="text-xs text-gray-500">Supplier Payable</div><div className="text-base md:text-lg font-bold leading-tight break-words">{currencyGH(tripProfitabilitySummary.totalSupplierPayable)}</div></CardContent></Card><Card className="rounded-xl"><CardContent className="p-3"><div className="text-xs text-gray-500">Fuel Captured</div><div className="text-base md:text-lg font-bold leading-tight break-words">{currencyGH(tripProfitabilitySummary.totalFuelCost)}</div><div className="text-[11px] text-gray-500 leading-tight">Cost to MAALVILA: {currencyGH(tripProfitabilitySummary.totalFuelCostToProfit)}</div></CardContent></Card><Card className="rounded-xl"><CardContent className="p-3"><div className="text-xs text-gray-500">Fuel Receivable</div><div className="text-base md:text-lg font-bold leading-tight break-words">{currencyGH(tripProfitabilitySummary.totalFuelReceivable)}</div><div className="text-[11px] text-gray-500 leading-tight">Reimbursed: {currencyGH(tripProfitabilitySummary.totalFuelReimbursed)}</div><div className="text-[11px] text-gray-500 leading-tight">Balance: {currencyGH(tripProfitabilitySummary.totalFuelReceivableBalance)}</div></CardContent></Card><Card className="rounded-xl"><CardContent className="p-3"><div className="text-xs text-gray-500">Trip Profit</div><div className={`text-base md:text-lg font-bold leading-tight break-words ${tripProfitabilitySummary.totalProfit < 0 ? "text-red-700" : "text-emerald-700"}`}>{currencyGH(tripProfitabilitySummary.totalProfit)}</div></CardContent></Card><Card className="rounded-xl"><CardContent className="p-3"><div className="text-xs text-gray-500">Loss / Awaiting Closeout</div><div className="text-base md:text-lg font-bold leading-tight break-words">{tripProfitabilitySummary.lossTrips} / {tripProfitabilitySummary.awaitingCloseout}</div></CardContent></Card></div><div className="overflow-auto"><table className="w-full text-sm"><thead><tr className="text-left border-b text-gray-600"><th className="py-2 pr-3">Trip</th><th className="py-2 pr-3">Vehicle / Route</th><th className="py-2 pr-3">Source</th><th className="py-2 pr-3 text-right">Client Net</th><th className="py-2 pr-3 text-right">Supplier Payable</th><th className="py-2 pr-3 text-right">Fuel Treatment</th><th className="py-2 pr-3 text-right">KM</th><th className="py-2 pr-3 text-right">Profit</th><th className="py-2 pr-3 text-right">Profit / KM</th><th className="py-2 pr-3">Status</th></tr></thead><tbody>{tripProfitabilityRows.map((row, idx) => <tr key={`${row.key}-${idx}`} className="border-b"><td className="py-2 pr-3"><b>{row.customer}</b><br /><span className="text-xs text-gray-500">{row.firstDate ? toISODateString(row.firstDate) : "—"} → {row.lastDate ? toISODateString(row.lastDate) : "—"}</span><br /><span className="text-xs text-gray-500">Driver: {row.driver}</span></td><td className="py-2 pr-3"><b>{row.carName}</b> ({row.carNumber})<br /><span className="text-xs text-gray-500">{row.route}</span></td><td className="py-2 pr-3">{row.sourceName}</td><td className="py-2 pr-3 text-right">{currencyGH(row.clientNet)}</td><td className="py-2 pr-3 text-right">{currencyGH(row.supplierPayable)}</td><td className="py-2 pr-3 text-right">{row.fuelBillingMode === "maalvila_absorbed" ? <><b>{currencyGH(row.fuelCostToProfit)}</b><br /><span className="text-xs text-red-600">MAALVILA cost</span></> : row.fuelBillingMode === "maalvila_reimbursable" ? <><b>{currencyGH(row.fuelReceivable)}</b><br /><span className="text-xs text-blue-600">Bill client with receipt</span><br /><span className="text-xs text-gray-500">Paid: {currencyGH(row.fuelReimbursed)}</span><br /><span className={row.fuelReceivableBalance > 0 ? "text-xs text-amber-700" : "text-xs text-emerald-700"}>Balance: {currencyGH(row.fuelReceivableBalance)}</span><br /><span className="text-xs text-gray-500">{row.fuelSettlementStatus}</span></> : <><b>{currencyGH(row.fuelCost)}</b><br /><span className="text-xs text-gray-500">Client paid direct</span></>}</td><td className="py-2 pr-3 text-right">{row.kmCovered ? Number(row.kmCovered).toLocaleString() : "—"}</td><td className={`py-2 pr-3 text-right font-semibold ${row.tripProfit < 0 ? "text-red-700" : "text-emerald-700"}`}>{currencyGH(row.tripProfit)}<br /><span className="text-xs text-gray-500">{row.profitMarginPct.toFixed(1)}%</span></td><td className="py-2 pr-3 text-right">{row.kmCovered ? currencyGH(row.profitPerKm) : "—"}</td><td className="py-2 pr-3"><span className={`inline-flex px-2 py-1 border rounded-xl text-xs ${row.statusClass}`}>{row.statusLabel}</span></td></tr>)}{!tripProfitabilityRows.length && <tr><td colSpan={10} className="py-3 text-gray-500">No trip profitability rows found.</td></tr>}</tbody></table></div><div className="text-xs text-gray-500">Note: Trip Profit = Client Net - Supplier Payable - MAALVILA-absorbed fuel cost only. Fuel paid directly by client is informational. Fuel paid by MAALVILA for later billing is tracked as a fuel receivable with receipt/reimbursement details until settled.</div></CardContent></Card>
     </>}
 
 
-    {activeView === "fuelClaims" && <>
+    {activeView === "fuelClaims" && <>{renderReportPeriodControls("Fuel Claims Report Period")}
       <Card className="rounded-2xl shadow">
         <CardContent className="p-4 space-y-3">
           <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-2">
@@ -3237,7 +3303,7 @@ export default function Dashboard() {
         </CardContent>
       </Card>
     </>}
-    {activeView === "customers" && <>
+    {activeView === "customers" && <>{renderReportPeriodControls("Customer Ledger Period")}
       <Card className="rounded-2xl shadow"><CardContent className="p-4 space-y-4"><div className="flex flex-col md:flex-row md:items-center md:justify-between gap-2"><div><h2 className="text-lg font-semibold">Customer Ledger & History</h2><div className="text-sm text-gray-600">A consolidated customer directory built from saved bookings. Use this to check repeat customers, balances, contact details and booking history without changing KPI calculations.</div></div><Button onClick={exportCustomerLedgerCSV} disabled={!can(role, "export")}>Export Customer Ledger CSV</Button></div><div className="grid md:grid-cols-4 gap-3 text-sm"><div className="p-3 rounded-xl border bg-blue-50">Total Customers<br /><b className="text-lg">{customerLedgerSummary.totalCustomers}</b></div><div className="p-3 rounded-xl border bg-rose-50">Customers With Balance<br /><b className="text-lg">{customerLedgerSummary.customersWithBalance}</b></div><div className="p-3 rounded-xl border bg-amber-50">Total Customer Balance<br /><b className="text-lg">{currencyGH(customerLedgerSummary.totalCustomerBalance)}</b></div><div className="p-3 rounded-xl border bg-emerald-50">Total Customer Net<br /><b className="text-lg">{currencyGH(customerLedgerSummary.totalCustomerNet)}</b></div></div><Input placeholder="Search customer, email, phone, car number or route" value={customerLedgerSearch} onChange={(e) => setCustomerLedgerSearch(e.target.value)} /></CardContent></Card>
       <Card className="rounded-2xl shadow"><CardContent className="p-4"><h2 className="text-lg font-semibold mb-3">Customer Directory</h2><div className="overflow-auto"><table className="w-full text-sm"><thead><tr className="text-left border-b text-gray-600"><th className="py-2 pr-3">Customer</th><th className="py-2 pr-3">Contact</th><th className="py-2 pr-3 text-right">Bookings</th><th className="py-2 pr-3 text-right">Vehicle Lines</th><th className="py-2 pr-3 text-right">Client Net</th><th className="py-2 pr-3 text-right">Paid</th><th className="py-2 pr-3 text-right">Balance</th><th className="py-2 pr-3">Last Activity</th></tr></thead><tbody>{filteredCustomerLedgerRows.map((row, idx) => <tr key={`${row.customerName}-${row.phone}-${idx}`} className="border-b align-top"><td className="py-2 pr-3 font-medium">{row.customerName}<br /><span className="text-xs text-gray-500">Channel: {row.preferredChannel || "email"}</span></td><td className="py-2 pr-3 text-xs">{row.email || "—"}<br />{row.phone || "—"}</td><td className="py-2 pr-3 text-right">{row.totalBookings}<br /><span className="text-xs text-gray-500">C:{row.confirmedBookings} P:{row.pendingBookings} X:{row.cancelledBookings}</span></td><td className="py-2 pr-3 text-right">{row.vehicleLines}</td><td className="py-2 pr-3 text-right">{currencyGH(row.totalClientNet)}</td><td className="py-2 pr-3 text-right">{currencyGH(row.totalPaid)}</td><td className={`py-2 pr-3 text-right font-semibold ${row.totalBalance > 0 ? "text-rose-700" : "text-emerald-700"}`}>{currencyGH(row.totalBalance)}</td><td className="py-2 pr-3 text-xs">{row.lastBookingDate ? toISODateString(row.lastBookingDate) : "—"}<br />{row.lastStatus || "—"}</td></tr>)}{!filteredCustomerLedgerRows.length && <tr><td colSpan={8} className="py-3 text-gray-500">No customers match the current search.</td></tr>}</tbody></table></div></CardContent></Card>
       <Card className="rounded-2xl shadow"><CardContent className="p-4"><h2 className="text-lg font-semibold mb-3">Customer Vehicles & Routes</h2><div className="overflow-auto"><table className="w-full text-sm"><thead><tr className="text-left border-b text-gray-600"><th className="py-2 pr-3">Customer</th><th className="py-2 pr-3">Cars Used</th><th className="py-2 pr-3">Routes Used</th><th className="py-2 pr-3 text-right">Admin Income</th><th className="py-2 pr-3 text-right">Supplier Payable</th></tr></thead><tbody>{filteredCustomerLedgerRows.map((row, idx) => <tr key={`route-${row.customerName}-${idx}`} className="border-b align-top"><td className="py-2 pr-3 font-medium">{row.customerName}</td><td className="py-2 pr-3 text-xs">{row.carNumbersText || "—"}</td><td className="py-2 pr-3 text-xs">{row.routesText || "—"}</td><td className="py-2 pr-3 text-right">{currencyGH(row.totalAdminIncome)}</td><td className="py-2 pr-3 text-right">{currencyGH(row.totalSupplierPayable)}</td></tr>)}</tbody></table></div></CardContent></Card>
@@ -3249,7 +3315,7 @@ export default function Dashboard() {
     </>}
 
 
-    {activeView === "suppliers" && <>
+    {activeView === "suppliers" && <>{renderReportPeriodControls("Supplier Ledger Period")}
       <Card className="rounded-2xl shadow"><CardContent className="p-4 space-y-4"><div className="flex flex-col md:flex-row md:items-center md:justify-between gap-2"><div><h2 className="text-lg font-semibold">Supplier Ledger & Source History</h2><div className="text-sm text-gray-600">A consolidated supplier ledger built from vehicle sources, confirmed booking lines and supplier payment audit entries. This does not change KPI calculations.</div></div><div className="flex flex-col md:flex-row gap-2"><Input placeholder="Search supplier, contact, car, route..." value={supplierLedgerSearch} onChange={(e) => setSupplierLedgerSearch(e.target.value)} /><Button onClick={exportSupplierLedgerCSV}>Export Supplier Ledger CSV</Button></div></div><div className="grid sm:grid-cols-2 lg:grid-cols-5 gap-3"><div className="p-3 rounded-xl border bg-white"><div className="text-xs text-gray-500">Suppliers / Sources</div><div className="text-xl font-bold">{supplierLedgerSummary.totalSuppliers}</div></div><div className="p-3 rounded-xl border bg-white"><div className="text-xs text-gray-500">With Balance</div><div className="text-xl font-bold">{supplierLedgerSummary.suppliersWithBalance}</div></div><div className="p-3 rounded-xl border bg-white"><div className="text-xs text-gray-500">Net Payable</div><div className="text-xl font-bold">{currencyGH(supplierLedgerSummary.totalSupplierPayable)}</div></div><div className="p-3 rounded-xl border bg-white"><div className="text-xs text-gray-500">Paid</div><div className="text-xl font-bold">{currencyGH(supplierLedgerSummary.totalSupplierPaid)}</div></div><div className="p-3 rounded-xl border bg-white"><div className="text-xs text-gray-500">Balance</div><div className="text-xl font-bold">{currencyGH(supplierLedgerSummary.totalSupplierBalance)}</div></div></div><div className="overflow-auto"><table className="w-full text-sm"><thead><tr className="text-left border-b text-gray-600"><th className="py-2 pr-3">Supplier / Source</th><th className="py-2 pr-3">Contact</th><th className="py-2 pr-3 text-right">Cars</th><th className="py-2 pr-3 text-right">Bookings</th><th className="py-2 pr-3 text-right">Lines</th><th className="py-2 pr-3 text-right">Net Payable</th><th className="py-2 pr-3 text-right">Paid</th><th className="py-2 pr-3 text-right">Balance</th><th className="py-2 pr-3">Last Activity</th></tr></thead><tbody>{filteredSupplierLedgerRows.map((row, idx) => <tr key={`${row.sourceId || row.sourceName}-${idx}`} className="border-b"><td className="py-2 pr-3"><b>{row.sourceName}</b><br /><span className="text-xs text-gray-500">{sourceTypeLabel(row.sourceType)}</span></td><td className="py-2 pr-3 text-xs">{row.contactPerson || "—"}<br />{row.phone || "—"}<br />{row.email || "—"}</td><td className="py-2 pr-3 text-right">{row.carsCount}</td><td className="py-2 pr-3 text-right">{row.totalBookings}<br /><span className="text-xs text-gray-500">C:{row.confirmedBookings} P:{row.pendingBookings} X:{row.cancelledBookings}</span></td><td className="py-2 pr-3 text-right">{row.vehicleLines}</td><td className="py-2 pr-3 text-right font-semibold">{currencyGH(row.netPayable)}</td><td className="py-2 pr-3 text-right">{currencyGH(row.paid)}<br /><span className="text-xs text-gray-500">{row.paymentCount} payment(s)</span></td><td className="py-2 pr-3 text-right font-semibold">{currencyGH(row.balance)}</td><td className="py-2 pr-3 text-xs">{row.lastBookingDate ? toISODateString(row.lastBookingDate) : "—"}</td></tr>)}{!filteredSupplierLedgerRows.length && <tr><td colSpan={9} className="py-3 text-gray-500">No supplier/source records match the search.</td></tr>}</tbody></table></div></CardContent></Card>
       <Card className="rounded-2xl shadow"><CardContent className="p-4"><h2 className="text-lg font-semibold mb-3">Supplier Vehicles & Routes</h2><div className="overflow-auto"><table className="w-full text-sm"><thead><tr className="text-left border-b text-gray-600"><th className="py-2 pr-3">Supplier</th><th className="py-2 pr-3">Cars Used</th><th className="py-2 pr-3">Routes Served</th><th className="py-2 pr-3 text-right">Admin Income From Lines</th></tr></thead><tbody>{filteredSupplierLedgerRows.map((row, idx) => <tr key={`supplier-routes-${row.sourceId || row.sourceName}-${idx}`} className="border-b"><td className="py-2 pr-3 font-semibold">{row.sourceName}</td><td className="py-2 pr-3 text-xs">{row.carNumbersText || "—"}</td><td className="py-2 pr-3 text-xs">{row.routesText || "—"}</td><td className="py-2 pr-3 text-right">{currencyGH(row.adminIncome)}</td></tr>)}{!filteredSupplierLedgerRows.length && <tr><td colSpan={4} className="py-3 text-gray-500">No supplier route records found.</td></tr>}</tbody></table></div></CardContent></Card>
     </>}
