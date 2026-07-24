@@ -1456,30 +1456,100 @@ export default function Dashboard() {
 
   const exportCustomerLedgerCSV = () => {
     const rows = [
-      ["CUSTOMER", "EMAIL", "PHONE", "CHANNEL", "BOOKINGS", "CONFIRMED", "PENDING", "CANCELLED", "VEHICLE_LINES", "CLIENT_NET", "PAID", "BALANCE", "ADMIN_INCOME", "SUPPLIER_PAYABLE", "CARS", "ROUTES", "LAST_BOOKING_DATE"],
-      ...filteredCustomerLedgerRows.map((row) => [row.customerName, row.email, row.phone, row.preferredChannel, row.totalBookings, row.confirmedBookings, row.pendingBookings, row.cancelledBookings, row.vehicleLines, row.totalClientNet, row.totalPaid, row.totalBalance, row.totalAdminIncome, row.totalSupplierPayable, row.carNumbersText, row.routesText, row.lastBookingDate ? toISODateString(row.lastBookingDate) : ""]),
+      [
+        "Customer",
+        "Email",
+        "Phone",
+        "Preferred Channel",
+        "Total Bookings",
+        "Confirmed Bookings",
+        "Pending Bookings",
+        "Cancelled Bookings",
+        "Vehicle Lines",
+        "Client Net Amount",
+        "Amount Paid",
+        "Balance",
+        "MAALVILA Admin Income",
+        "Supplier Payable",
+        "Cars Used",
+        "Routes",
+        "Last Booking Date",
+      ],
+      ...filteredCustomerLedgerRows.map((row) => [
+        row.customerName,
+        row.email,
+        row.phone,
+        row.preferredChannel,
+        row.totalBookings,
+        row.confirmedBookings,
+        row.pendingBookings,
+        row.cancelledBookings,
+        row.vehicleLines,
+        row.totalClientNet,
+        row.totalPaid,
+        row.totalBalance,
+        row.totalAdminIncome,
+        row.totalSupplierPayable,
+        row.carNumbersText,
+        row.routesText,
+        row.lastBookingDate ? toISODateString(row.lastBookingDate) : "",
+      ]),
     ];
-    const csv = rows.map((row) => row.map((cell) => `"${String(cell ?? "").replaceAll('"', '""')}"`).join(",")).join("\n");
-    const link = document.createElement("a");
-    link.href = encodeURI(`data:text/csv;charset=utf-8,${csv}`);
-    link.download = `maalvila_customer_ledger_${new Date().toISOString().slice(0, 10)}.csv`;
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
+
+    downloadCsvRows(rows, `maalvila_customer_ledger_${new Date().toISOString().slice(0, 10)}.csv`);
   };
 
   const exportSupplierLedgerCSV = () => {
     const rows = [
-      ["SUPPLIER", "TYPE", "CONTACT_PERSON", "PHONE", "EMAIL", "CARS_COUNT", "BOOKINGS", "CONFIRMED", "PENDING", "CANCELLED", "VEHICLE_LINES", "GROSS_SUPPLIER", "DISCOUNT_SHARE", "NET_PAYABLE", "PAID", "BALANCE", "ADMIN_INCOME", "PAYMENT_COUNT", "CARS", "ROUTES", "LAST_BOOKING_DATE"],
-      ...filteredSupplierLedgerRows.map((row) => [row.sourceName, sourceTypeLabel(row.sourceType), row.contactPerson, row.phone, row.email, row.carsCount, row.totalBookings, row.confirmedBookings, row.pendingBookings, row.cancelledBookings, row.vehicleLines, row.grossSupplier, row.discountShare, row.netPayable, row.paid, row.balance, row.adminIncome, row.paymentCount, row.carNumbersText, row.routesText, row.lastBookingDate ? toISODateString(row.lastBookingDate) : ""]),
+      [
+        "Supplier / Source",
+        "Supplier Type",
+        "Contact Person",
+        "Phone",
+        "Email",
+        "Cars Count",
+        "Total Bookings",
+        "Confirmed Bookings",
+        "Pending Bookings",
+        "Cancelled Bookings",
+        "Vehicle Lines",
+        "Gross Supplier Amount",
+        "Discount Share",
+        "Net Payable",
+        "Amount Paid",
+        "Balance",
+        "MAALVILA Admin Income",
+        "Payment Count",
+        "Cars",
+        "Routes",
+        "Last Booking Date",
+      ],
+      ...filteredSupplierLedgerRows.map((row) => [
+        row.sourceName,
+        sourceTypeLabel(row.sourceType),
+        row.contactPerson,
+        row.phone,
+        row.email,
+        row.carsCount,
+        row.totalBookings,
+        row.confirmedBookings,
+        row.pendingBookings,
+        row.cancelledBookings,
+        row.vehicleLines,
+        row.grossSupplier,
+        row.discountShare,
+        row.netPayable,
+        row.paid,
+        row.balance,
+        row.adminIncome,
+        row.paymentCount,
+        row.carNumbersText,
+        row.routesText,
+        row.lastBookingDate ? toISODateString(row.lastBookingDate) : "",
+      ]),
     ];
-    const csv = rows.map((row) => row.map((cell) => `"${String(cell ?? "").replaceAll('"', '""')}"`).join(",")).join("\n");
-    const link = document.createElement("a");
-    link.href = encodeURI(`data:text/csv;charset=utf-8,${csv}`);
-    link.download = `maalvila_supplier_ledger_${new Date().toISOString().slice(0, 10)}.csv`;
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
+
+    downloadCsvRows(rows, `maalvila_supplier_ledger_${new Date().toISOString().slice(0, 10)}.csv`);
   };
 
 
@@ -2388,46 +2458,104 @@ export default function Dashboard() {
     await updateDoc(doc(db, "bookings", b.id), { status: "cancelled", penalty, updatedAt: serverTimestamp() });
     await addDoc(collection(db, "audit"), sanitizeForFirestore({ action: `Booking cancelled (${b.customer})${penalty ? ` — Penalty ${currencyGH(penalty)}` : ""}`, userId: user?.email || roleEmail || "", uid: user?.uid || "", time: serverTimestamp() }));
   };
-  const exportCSV = () => {
-    if (!can(role, "export")) return alert("You do not have permission to export.");
-    if (!filteredBookings.length) return alert("No bookings to export.");
-    const rows = filteredBookings.map((b) => {
-      const items = getBookingItems(b, cars);
-      const totals = getBookingTotals(b, cars);
-      const totalAmount = computeBookingTotalAmount(b, cars);
-      const amountPaid = clampMoney(b.amountPaid || 0);
-      const balance = Math.max(0, totalAmount - amountPaid);
-      const payStatus = b.paymentStatus || computePaymentStatus(totalAmount, amountPaid);
-      return {
-        Customer: (b.customer || "").replaceAll(",", " "),
-        CustomerEmail: (b.customerEmail || "").replaceAll(",", " "),
-        CustomerPhone: (b.customerPhone || "").replaceAll(",", " "),
-        Routes: Array.from(new Set(items.map((i) => `${i.travelFrom || "—"} to ${i.travelTo || "—"}`))).join(" | ").replaceAll(",", " "),
-        Vehicles: String(items.length),
-        CarLines: items.map((i) => `${i.carName} (${i.carNumber}) ${i.travelFrom || "—"}->${i.travelTo || "—"} [${normalizeSelectedDates(i.selectedDates).map(toISODateString).join(";")}]`).join(" | ").replaceAll(",", " "),
-        Sources: Array.from(new Set(items.map((i) => i.sourceName).filter(Boolean))).join(" | ").replaceAll(",", " "),
-        Status: b.status || "",
-        Days: String(computeBookingDateSummary(items).length),
-        Dates: computeBookingDateSummary(items).map(toISODateString).join(" | "),
-        ClientGross: String(totals.totalGrossClientAmount || 0),
-        Discount: String(totals.totalDiscountAmount || 0),
-        ClientNet: String(totals.totalNetClientAmount || 0),
-        SupplierPayable: String(totals.totalNetSupplierPayable || 0),
-        AdminIncome: String(totals.totalNetAdminIncome || 0),
-        AmountPaid: String(amountPaid || 0),
-        Balance: String(balance || 0),
-        PaymentStatus: String(payStatus || "unpaid"),
-      };
-    });
-    const header = Object.keys(rows[0]).join(",");
-    const body = rows.map((r) => Object.values(r).join(",")).join("\n");
-    const csvContent = "data:text/csv;charset=utf-8," + header + "\n" + body;
+  // phase3w-c-improved-export-headings
+  const downloadCsvRows = (rows, filename) => {
+    const csv = rows
+      .map((row) => row.map((cell) => `"${String(cell ?? "").replaceAll('"', '""')}"`).join(","))
+      .join("\n");
+
+    const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
     const link = document.createElement("a");
-    link.href = encodeURI(csvContent);
-    link.download = `bookings_${format(new Date(), "yyyyMMdd_HHmm")}.csv`;
+    link.href = URL.createObjectURL(blob);
+    link.download = filename;
     document.body.appendChild(link);
     link.click();
     document.body.removeChild(link);
+    setTimeout(() => URL.revokeObjectURL(link.href), 1000);
+  };
+
+  const exportCSV = () => {
+    if (!can(role, "export")) return alert("You do not have permission to export.");
+    if (!filteredBookings.length) return alert("No bookings to export.");
+
+    const rows = [
+      [
+        "Customer",
+        "Customer Email",
+        "Customer Phone",
+        "Preferred Channel",
+        "Booking Status",
+        "Payment Status",
+        "Routes",
+        "Vehicles Count",
+        "Vehicle Lines",
+        "Sources / Suppliers",
+        "Chargeable Days",
+        "Booking Dates",
+        "Client Gross Amount",
+        "Discount Amount",
+        "Client Net Amount",
+        "Supplier Payable",
+        "MAALVILA Admin Income",
+        "Taxable Amount",
+        "VAT Amount",
+        "NHIL Amount",
+        "GETFund Amount",
+        "Total Tax",
+        "Client Grand Total",
+        "Fuel on Invoice",
+        "Fuel Invoice Amount",
+        "Final Amount Payable",
+        "Amount Paid",
+        "Balance",
+        "Comments / Special Instructions",
+      ],
+      ...filteredBookings.map((b) => {
+        const items = getBookingItems(b, cars);
+        const totals = getBookingTotals(b, cars);
+        const vat = getBookingVatSummary(b, cars);
+        const totalAmount = computeBookingTotalAmount(b, cars);
+        const amountPaid = clampMoney(b.amountPaid || 0);
+        const balance = Math.max(0, totalAmount - amountPaid);
+        const payStatus = b.paymentStatus || computePaymentStatus(totalAmount, amountPaid);
+        const fuelAmount = typeof getBookingFuelInvoiceAmount === "function" ? getBookingFuelInvoiceAmount(b) : 0;
+        const finalAmount = vat.grandTotal + fuelAmount;
+
+        return [
+          b.customer || "",
+          b.customerEmail || "",
+          b.customerPhone || "",
+          b.preferredChannel || "",
+          b.status || "",
+          payStatus,
+          Array.from(new Set(items.map((i) => `${i.travelFrom || "—"} to ${i.travelTo || "—"}`))).join(" | "),
+          items.length,
+          items.map((i) => `${i.carName} (${i.carNumber}) ${i.travelFrom || "—"} to ${i.travelTo || "—"} [${normalizeSelectedDates(i.selectedDates).map(toISODateString).join(";")}]`).join(" | "),
+          Array.from(new Set(items.map((i) => i.sourceName).filter(Boolean))).join(" | "),
+          computeBookingDateSummary(items).length,
+          computeBookingDateSummary(items).map(toISODateString).join(" | "),
+          totals.totalGrossClientAmount || 0,
+          totals.totalDiscountAmount || 0,
+          totals.totalNetClientAmount || 0,
+          totals.totalNetSupplierPayable || 0,
+          totals.totalNetAdminIncome || 0,
+          vat.taxableAmount || 0,
+          vat.vat || 0,
+          vat.nhil || 0,
+          vat.getfund || 0,
+          vat.totalTax || 0,
+          vat.grandTotal || 0,
+          b.includeFuelOnInvoice ? "Yes" : "No",
+          fuelAmount,
+          finalAmount,
+          amountPaid,
+          balance,
+          b.comments || "",
+        ];
+      }),
+    ];
+
+    downloadCsvRows(rows, `maalvila_bookings_export_${new Date().toISOString().slice(0, 10)}.csv`);
   };
   const renderReportPeriodControls = (title = 'Report Period') => (
     <Card className="rounded-2xl border bg-white">
@@ -2800,6 +2928,176 @@ export default function Dashboard() {
       </div>
     </div>
   );
+  // phase3w-d-gra-vat-audit-report
+  // phase3w-d-fix-gra-hook-order
+  const graVatAuditRows = (() => {
+    const sourceBookings = typeof reportFilteredBookings === "undefined" ? bookings : reportFilteredBookings;
+    const rows = [];
+
+    // phase3w-d2-gra-audit-cleanup
+    for (const booking of sourceBookings) {
+      if (String(booking?.status || "").toLowerCase() === "cancelled") continue;
+      const items = getBookingItems(booking, cars);
+      const bookingVat = getBookingVatSummary(booking, cars);
+      const bookingTotal = computeBookingTotalAmount(booking, cars);
+      const amountPaid = clampMoney(booking.amountPaid || 0);
+      const balance = Math.max(0, bookingTotal - amountPaid);
+      const paymentStatus = booking.paymentStatus || computePaymentStatus(bookingTotal, amountPaid);
+      const fuelAmount = typeof getBookingFuelInvoiceAmount === "function" ? getBookingFuelInvoiceAmount(booking) : 0;
+      const bookingDates = computeBookingDateSummary(items, booking.selectedDates);
+      const firstDate = bookingDates[0] || null;
+      const lastDate = bookingDates[bookingDates.length - 1] || null;
+
+      for (const item of items) {
+        const lineVat = item.vatSummary || computeGhanaVatSummary(
+          item.grossClientAmount || 0,
+          item.discountAmount || 0,
+          clientVatApplies(item.clientVatMode),
+          item.clientVatMode || "exclusive"
+        );
+
+        rows.push({
+          key: `${booking.id || "booking"}-${item.itemId || item.carNumber || rows.length}`,
+          customer: booking.customer || "",
+          customerPhone: booking.customerPhone || "",
+          bookingStatus: booking.status || "",
+          paymentStatus,
+          firstDate,
+          lastDate,
+          bookingDatesText: bookingDates.map(toISODateString).join(" | "),
+          vehicle: item.carName || "",
+          carNumber: item.carNumber || "",
+          route: `${item.travelFrom || "—"} to ${item.travelTo || "—"}`,
+          vatTreatment: item.vatLabel || clientVatModeLabel(item.clientVatMode || "exclusive"),
+          vatMode: item.clientVatMode || "exclusive",
+          subtotal: clampMoney(lineVat.subtotal),
+          discount: clampMoney(lineVat.discount),
+          taxableAmount: clampMoney(lineVat.taxableAmount),
+          vat: clampMoney(lineVat.vat),
+          nhil: clampMoney(lineVat.nhil),
+          getfund: clampMoney(lineVat.getfund),
+          totalTax: clampMoney(lineVat.totalTax),
+          grandTotal: clampMoney(lineVat.grandTotal),
+          bookingVatTreatment: bookingVat.vatModesText || "",
+          fuelOnInvoice: booking.includeFuelOnInvoice ? "Yes" : "No",
+          fuelInvoiceAmount: fuelAmount,
+          bookingFinalAmount: clampMoney(bookingVat.grandTotal || 0) + fuelAmount,
+          amountPaid,
+          balance,
+        });
+      }
+    }
+
+    return rows.sort((a, b) => String(a.customer).localeCompare(String(b.customer)) || String(a.firstDate || "").localeCompare(String(b.firstDate || "")));
+  })();
+
+  const graVatAuditSummary = (() => {
+    return graVatAuditRows.reduce((acc, row) => {
+      acc.lines += 1;
+      acc.subtotal += row.subtotal;
+      acc.discount += row.discount;
+      acc.taxableAmount += row.taxableAmount;
+      acc.vat += row.vat;
+      acc.nhil += row.nhil;
+      acc.getfund += row.getfund;
+      acc.totalTax += row.totalTax;
+      acc.grandTotal += row.grandTotal;
+      acc.fuelInvoiceAmount += row.fuelInvoiceAmount;
+      acc.finalAmount += row.bookingFinalAmount;
+      acc.amountPaid += row.amountPaid;
+      acc.balance += row.balance;
+      if (row.vatMode === "exclusive") acc.exclusive += 1;
+      else if (row.vatMode === "inclusive") acc.inclusive += 1;
+      else if (row.vatMode === "none") acc.noVat += 1;
+      else if (row.vatMode === "exempt") acc.exempt += 1;
+      return acc;
+    }, {
+      lines: 0,
+      subtotal: 0,
+      discount: 0,
+      taxableAmount: 0,
+      vat: 0,
+      nhil: 0,
+      getfund: 0,
+      totalTax: 0,
+      grandTotal: 0,
+      fuelInvoiceAmount: 0,
+      finalAmount: 0,
+      amountPaid: 0,
+      balance: 0,
+      exclusive: 0,
+      inclusive: 0,
+      noVat: 0,
+      exempt: 0,
+    });
+  })();
+
+  const exportGraVatAuditCSV = () => {
+    if (!can(role, "export")) return alert("You do not have permission to export.");
+    if (!graVatAuditRows.length) return alert("No GRA/VAT audit rows to export.");
+
+    const rows = [
+      [
+        "Customer",
+        "Customer Phone",
+        "Booking Status",
+        "Payment Status",
+        "First Booking Date",
+        "Last Booking Date",
+        "Booking Dates",
+        "Vehicle",
+        "Car Number",
+        "Route",
+        "VAT Treatment",
+        "VAT Mode",
+        "Booking VAT Treatment",
+        "Subtotal",
+        "Discount",
+        "Taxable Amount",
+        "VAT 15%",
+        "NHIL 2.5%",
+        "GETFund 2.5%",
+        "Total Tax",
+        "Grand Total",
+        "Fuel on Invoice",
+        "Fuel Invoice Amount",
+        "Booking Final Amount",
+        "Amount Paid",
+        "Balance",
+      ],
+      ...graVatAuditRows.map((row) => [
+        row.customer,
+        row.customerPhone,
+        row.bookingStatus,
+        row.paymentStatus,
+        row.firstDate ? toISODateString(row.firstDate) : "",
+        row.lastDate ? toISODateString(row.lastDate) : "",
+        row.bookingDatesText,
+        row.vehicle,
+        row.carNumber,
+        row.route,
+        row.vatTreatment,
+        row.vatMode,
+        row.bookingVatTreatment,
+        row.subtotal,
+        row.discount,
+        row.taxableAmount,
+        row.vat,
+        row.nhil,
+        row.getfund,
+        row.totalTax,
+        row.grandTotal,
+        row.fuelOnInvoice,
+        row.fuelInvoiceAmount,
+        row.bookingFinalAmount,
+        row.amountPaid,
+        row.balance,
+      ]),
+    ];
+
+    downloadCsvRows(rows, `maalvila_gra_vat_audit_report_${new Date().toISOString().slice(0, 10)}.csv`);
+  };
+
   const renderDocumentPrintControls = (label = "Document") => (
     <div className="phase3s-print-save-pdf no-print flex flex-wrap items-center justify-between gap-2 border-b pb-3 mb-3">
       <div>
@@ -2985,7 +3283,7 @@ export default function Dashboard() {
 
   return <div className="p-4 md:p-6 space-y-6 max-w-6xl mx-auto bg-slate-50 min-h-screen">
     <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-3"><motion.h1 initial={{ opacity: 0, y: -10 }} animate={{ opacity: 1, y: 0 }} className="text-2xl md:text-3xl font-bold">MAALVILA Rental Car Booking System</motion.h1><div className="flex items-center gap-2"><div className="text-sm text-gray-700">Signed in: <b>{roleEmail || user.email || "unknown"}</b> • Role: <b className="uppercase">{role}</b></div><Button variant="outline" className="gap-2" onClick={logout}><LogOut className="w-4 h-4" /> Logout</Button></div></div>
-    <Card className="rounded-2xl border bg-white"><CardContent className="p-3"><div className="flex flex-wrap gap-2">{[{ key: "overview", label: "Overview", icon: <LayoutDashboard className="w-4 h-4" /> }, { key: "bookings", label: "Bookings", icon: <ClipboardList className="w-4 h-4" /> }, { key: "availability", label: "Availability", icon: <CalendarDays className="w-4 h-4" /> }, { key: "dispatch", label: "Dispatch", icon: <ClipboardList className="w-4 h-4" /> }, { key: "closeout", label: "Trip Closeout", icon: <Car className="w-4 h-4" /> }, { key: "maintenance", label: "Maintenance", icon: <Car className="w-4 h-4" /> }, { key: "reports", label: "Reports", icon: <FileText className="w-4 h-4" /> }, { key: "profitability", label: "Profitability", icon: <Banknote className="w-4 h-4" /> }, { key: "fuelClaims", label: "Fuel Claims", icon: <ReceiptText className="w-4 h-4" /> }, { key: "launch", label: "Launch Readiness", icon: <ReceiptText className="w-4 h-4" /> }, { key: "customers", label: "Customers", icon: <UsersRound className="w-4 h-4" /> }, { key: "suppliers", label: "Suppliers", icon: <Building2 className="w-4 h-4" /> }, { key: "cars", label: "Cars & Sources", icon: <Car className="w-4 h-4" /> }, { key: "documents", label: "Documents", icon: <ReceiptText className="w-4 h-4" /> }, { key: "settings", label: "Settings", icon: <Settings className="w-4 h-4" /> }, { key: "audit", label: "Audit Trail", icon: <FileText className="w-4 h-4" /> }].map((tab) => <Button key={tab.key} variant={activeView === tab.key ? "default" : "outline"} className="gap-2" onClick={() => setActiveView(tab.key)}>{tab.icon}{tab.label}</Button>)}</div></CardContent></Card>
+    <Card className="rounded-2xl border bg-white"><CardContent className="p-3"><div className="flex flex-wrap gap-2">{[{ key: "overview", label: "Overview", icon: <LayoutDashboard className="w-4 h-4" /> }, { key: "bookings", label: "Bookings", icon: <ClipboardList className="w-4 h-4" /> }, { key: "availability", label: "Availability", icon: <CalendarDays className="w-4 h-4" /> }, { key: "dispatch", label: "Dispatch", icon: <ClipboardList className="w-4 h-4" /> }, { key: "closeout", label: "Trip Closeout", icon: <Car className="w-4 h-4" /> }, { key: "maintenance", label: "Maintenance", icon: <Car className="w-4 h-4" /> }, { key: "reports", label: "Reports", icon: <FileText className="w-4 h-4" /> }, { key: "graAudit", label: "GRA/VAT Audit", icon: <ReceiptText className="w-4 h-4" /> }, { key: "profitability", label: "Profitability", icon: <Banknote className="w-4 h-4" /> }, { key: "fuelClaims", label: "Fuel Claims", icon: <ReceiptText className="w-4 h-4" /> }, { key: "launch", label: "Launch Readiness", icon: <ReceiptText className="w-4 h-4" /> }, { key: "customers", label: "Customers", icon: <UsersRound className="w-4 h-4" /> }, { key: "suppliers", label: "Suppliers", icon: <Building2 className="w-4 h-4" /> }, { key: "cars", label: "Cars & Sources", icon: <Car className="w-4 h-4" /> }, { key: "documents", label: "Documents", icon: <ReceiptText className="w-4 h-4" /> }, { key: "settings", label: "Settings", icon: <Settings className="w-4 h-4" /> }, { key: "audit", label: "Audit Trail", icon: <FileText className="w-4 h-4" /> }].map((tab) => <Button key={tab.key} variant={activeView === tab.key ? "default" : "outline"} className="gap-2" onClick={() => setActiveView(tab.key)}>{tab.icon}{tab.label}</Button>)}</div></CardContent></Card>
 
     {activeView === "overview" && <><div className="grid sm:grid-cols-2 lg:grid-cols-4 gap-3">{kpiCards.map((k) => <Card key={k.label} className={`rounded-2xl border ${k.bg}`}><CardContent className="p-4 flex items-center gap-3"><div className="p-2 rounded-xl bg-white/80">{k.icon}</div><div><div className="text-xs text-gray-600">{k.label}</div><div className="text-xl font-bold">{k.value}</div></div></CardContent></Card>)}</div><div className="grid lg:grid-cols-2 gap-4"><Card className="rounded-2xl"><CardContent className="p-4"><h2 className="font-semibold text-lg">Top Cars (Vehicle Lines)</h2><div className="h-64 mt-2"><ResponsiveContainer width="100%" height="100%"><BarChart data={topCarsBarData}><CartesianGrid strokeDasharray="3 3" /><XAxis dataKey="label" hide /><YAxis /><ReTooltip formatter={(v) => [`${v}`, "Vehicle lines"]} /><Bar dataKey="count">{topCarsBarData.map((r) => <Cell key={r.carNo} fill={hashColor(r.carNo)} />)}</Bar></BarChart></ResponsiveContainer></div></CardContent></Card><Card className="rounded-2xl"><CardContent className="p-4"><h2 className="font-semibold text-lg">Booking Status</h2><div className="h-64 mt-2"><ResponsiveContainer width="100%" height="100%"><PieChart><ReTooltip /><Legend /><Pie data={statusPieData} dataKey="value" nameKey="name" outerRadius={90} label>{statusPieData.map((s) => <Cell key={s.name} fill={hashColor(s.name)} />)}</Pie></PieChart></ResponsiveContainer></div></CardContent></Card></div><div className="grid lg:grid-cols-2 gap-4"><Card className="rounded-2xl"><CardContent className="p-4"><div className="flex justify-between gap-2"><h2 className="font-semibold text-lg">Client Net Revenue Trend</h2><select className="border rounded-lg p-2 text-sm" value={trendMode} onChange={(e) => setTrendMode(e.target.value)}><option value="monthly">Monthly</option><option value="quarterly">Quarterly</option></select></div><div className="h-64 mt-2"><ResponsiveContainer width="100%" height="100%"><LineChart data={revenueTrendData}><CartesianGrid strokeDasharray="3 3" /><XAxis dataKey="period" /><YAxis /><ReTooltip formatter={(v) => [currencyGH(v), "Revenue"]} /><Line type="monotone" dataKey="revenue" stroke={hashColor("revenue")} strokeWidth={3} dot /></LineChart></ResponsiveContainer></div></CardContent></Card><Card className="rounded-2xl"><CardContent className="p-4"><h2 className="font-semibold text-lg">Utilization (Last 90 Days)</h2><div className="h-64 mt-2"><ResponsiveContainer width="100%" height="100%"><BarChart data={utilizationTopCars}><CartesianGrid strokeDasharray="3 3" /><XAxis dataKey="label" hide /><YAxis /><ReTooltip formatter={(v) => [`${v}`, "Booked days"]} /><Bar dataKey="bookedDays">{utilizationTopCars.map((r) => <Cell key={r.carNo} fill={hashColor("util-" + r.carNo)} />)}</Bar></BarChart></ResponsiveContainer></div></CardContent></Card></div><Card className="rounded-2xl shadow"><CardContent className="p-4"><h2 className="text-lg font-semibold mb-3">Top Customers (Confirmed Client Net Revenue)</h2><table className="w-full text-sm"><tbody>{topCustomers.map((c) => <tr key={c.customerName} className="border-b"><td className="py-2 font-medium">{c.customerName}</td><td className="py-2 text-right">{currencyGH(c.total)}</td></tr>)}{!topCustomers.length && <tr><td className="py-3 text-gray-500">No confirmed bookings yet.</td></tr>}</tbody></table></CardContent></Card></>}
 
@@ -3051,6 +3349,82 @@ export default function Dashboard() {
       <Card className="rounded-2xl shadow"><CardContent className="p-4"><h2 className="text-lg font-semibold mb-3">Monthly Confirmed Performance</h2><div className="overflow-auto"><table className="w-full text-sm"><thead><tr className="text-left border-b text-gray-600"><th className="py-2 pr-3">Month</th><th className="py-2 pr-3 text-right">Bookings</th><th className="py-2 pr-3 text-right">Client Net</th><th className="py-2 pr-3 text-right">Supplier Payable</th><th className="py-2 pr-3 text-right">Admin Income</th></tr></thead><tbody>{monthlyRevenueRows.map((row) => <tr key={row.monthKey} className="border-b"><td className="py-2 pr-3 font-medium">{row.monthKey}</td><td className="py-2 pr-3 text-right">{row.bookings}</td><td className="py-2 pr-3 text-right">{currencyGH(row.clientNet)}</td><td className="py-2 pr-3 text-right">{currencyGH(row.supplierPayable)}</td><td className="py-2 pr-3 text-right font-semibold">{currencyGH(row.adminIncome)}</td></tr>)}{!monthlyRevenueRows.length && <tr><td colSpan={5} className="py-3 text-gray-500">No confirmed monthly performance data yet.</td></tr>}</tbody></table></div></CardContent></Card>
     </>}
 
+
+    {activeView === "graAudit" && <>
+      {typeof renderReportPeriodControls === "function" ? renderReportPeriodControls("GRA/VAT Audit Report Period") : null}
+
+      <Card className="rounded-2xl shadow">
+        <CardContent className="p-4 space-y-3">
+          <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-2">
+            <div>
+              <h2 className="text-lg font-semibold">GRA/VAT Audit Report</h2>
+              <div className="text-sm text-gray-600">
+                Shows VAT Exclusive, VAT Inclusive, No VAT / VAT not required and VAT Exempt lines by customer, payment status and tax component. Cancelled bookings are excluded.
+              </div>
+            </div>
+            <Button onClick={exportGraVatAuditCSV} disabled={!can(role, "export")}>Export GRA/VAT CSV</Button>
+          </div>
+
+          <div className="grid sm:grid-cols-2 lg:grid-cols-4 xl:grid-cols-8 gap-3">
+            <Card className="rounded-xl"><CardContent className="p-3"><div className="text-xs text-gray-500">Audit Lines</div><div className="text-xs sm:text-sm font-semibold leading-snug break-words">{graVatAuditSummary.lines}</div></CardContent></Card>
+            <Card className="rounded-xl"><CardContent className="p-3"><div className="text-xs text-gray-500">Taxable Amount</div><div className="text-xs sm:text-sm font-semibold leading-snug break-words">{currencyGH(graVatAuditSummary.taxableAmount)}</div></CardContent></Card>
+            <Card className="rounded-xl"><CardContent className="p-3"><div className="text-xs text-gray-500">VAT 15%</div><div className="text-xs sm:text-sm font-semibold leading-snug break-words">{currencyGH(graVatAuditSummary.vat)}</div></CardContent></Card>
+            <Card className="rounded-xl"><CardContent className="p-3"><div className="text-xs text-gray-500">NHIL 2.5%</div><div className="text-xs sm:text-sm font-semibold leading-snug break-words">{currencyGH(graVatAuditSummary.nhil)}</div></CardContent></Card>
+            <Card className="rounded-xl"><CardContent className="p-3"><div className="text-xs text-gray-500">GETFund 2.5%</div><div className="text-xs sm:text-sm font-semibold leading-snug break-words">{currencyGH(graVatAuditSummary.getfund)}</div></CardContent></Card>
+            <Card className="rounded-xl"><CardContent className="p-3"><div className="text-xs text-gray-500">Total Tax</div><div className="text-xs sm:text-sm font-semibold leading-snug break-words">{currencyGH(graVatAuditSummary.totalTax)}</div></CardContent></Card>
+            <Card className="rounded-xl"><CardContent className="p-3"><div className="text-xs text-gray-500">Grand Total</div><div className="text-xs sm:text-sm font-semibold leading-snug break-words">{currencyGH(graVatAuditSummary.grandTotal)}</div></CardContent></Card>
+            <Card className="rounded-xl"><CardContent className="p-3"><div className="text-xs text-gray-500">Balance</div><div className="text-xs sm:text-sm font-semibold leading-snug break-words">{currencyGH(graVatAuditSummary.balance)}</div></CardContent></Card>
+          </div>
+
+          <div className="grid sm:grid-cols-2 lg:grid-cols-4 gap-3">
+            <Card className="rounded-xl"><CardContent className="p-3"><div className="text-xs text-gray-500">VAT Exclusive Lines</div><div className="text-lg font-bold">{graVatAuditSummary.exclusive}</div></CardContent></Card>
+            <Card className="rounded-xl"><CardContent className="p-3"><div className="text-xs text-gray-500">VAT Inclusive Lines</div><div className="text-lg font-bold">{graVatAuditSummary.inclusive}</div></CardContent></Card>
+            <Card className="rounded-xl"><CardContent className="p-3"><div className="text-xs text-gray-500">No VAT Lines</div><div className="text-lg font-bold">{graVatAuditSummary.noVat}</div></CardContent></Card>
+            <Card className="rounded-xl"><CardContent className="p-3"><div className="text-xs text-gray-500">VAT Exempt Lines</div><div className="text-lg font-bold">{graVatAuditSummary.exempt}</div></CardContent></Card>
+          </div>
+
+          <div className="overflow-auto border rounded-xl">
+            <table className="w-full text-sm bg-white">
+              <thead className="bg-slate-50">
+                <tr>
+                  <th className="p-2 text-left">Customer</th>
+                  <th className="p-2 text-left">Date</th>
+                  <th className="p-2 text-left">Vehicle</th>
+                  <th className="p-2 text-left">VAT Treatment</th>
+                  <th className="p-2 text-right">Taxable</th>
+                  <th className="p-2 text-right">VAT</th>
+                  <th className="p-2 text-right">NHIL</th>
+                  <th className="p-2 text-right">GETFund</th>
+                  <th className="p-2 text-right">Total Tax</th>
+                  <th className="p-2 text-right">Grand Total</th>
+                  <th className="p-2 text-left">Payment</th>
+                  <th className="p-2 text-right">Balance</th>
+                </tr>
+              </thead>
+              <tbody>
+                {graVatAuditRows.map((row) => (
+                  <tr key={row.key} className="border-t">
+                    <td className="p-2">{row.customer}</td>
+                    <td className="p-2">{row.firstDate ? toISODateString(row.firstDate) : "—"}</td>
+                    <td className="p-2">{row.vehicle} ({row.carNumber})</td>
+                    <td className="p-2">{row.vatTreatment}</td>
+                    <td className="p-2 text-right">{currencyGH(row.taxableAmount)}</td>
+                    <td className="p-2 text-right">{currencyGH(row.vat)}</td>
+                    <td className="p-2 text-right">{currencyGH(row.nhil)}</td>
+                    <td className="p-2 text-right">{currencyGH(row.getfund)}</td>
+                    <td className="p-2 text-right font-semibold">{currencyGH(row.totalTax)}</td>
+                    <td className="p-2 text-right">{currencyGH(row.grandTotal)}</td>
+                    <td className="p-2">{row.paymentStatus}</td>
+                    <td className="p-2 text-right">{currencyGH(row.balance)}</td>
+                  </tr>
+                ))}
+                {!graVatAuditRows.length && <tr><td colSpan={12} className="p-3 text-gray-500">No GRA/VAT audit rows found for the selected period.</td></tr>}
+              </tbody>
+            </table>
+          </div>
+        </CardContent>
+      </Card>
+    </>}
 
     {activeView === "profitability" && <>{renderReportPeriodControls("Profitability Report Period")}
       <Card className="rounded-2xl shadow"><CardContent className="p-4 space-y-3"><div className="flex flex-col md:flex-row md:items-center md:justify-between gap-2"><div><h2 className="text-lg font-semibold">Trip Profitability</h2><div className="text-sm text-gray-600">Compares client net against supplier payable and applies fuel only when MAALVILA absorbs it. Fuel paid directly by client does not affect MAALVILA profit. Fuel paid by MAALVILA for later billing is tracked as a receivable until reimbursed; it does not reduce trip profit unless management chooses to absorb it as a cost.</div></div><Button onClick={exportTripProfitabilityCSV} disabled={!can(role, "export")}>Export Profitability CSV</Button></div><Input placeholder="Search customer, vehicle, route, driver, source or status" value={profitabilitySearch} onChange={(e) => setProfitabilitySearch(e.target.value)} /><div className="grid sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-3"><Card className="rounded-xl"><CardContent className="p-3"><div className="text-xs text-gray-500">Trip Lines</div><div className="text-base md:text-lg font-bold leading-tight break-words">{tripProfitabilitySummary.totalTrips}</div></CardContent></Card><Card className="rounded-xl"><CardContent className="p-3"><div className="text-xs text-gray-500">Client Net</div><div className="text-base md:text-lg font-bold leading-tight break-words">{currencyGH(tripProfitabilitySummary.totalClientNet)}</div></CardContent></Card><Card className="rounded-xl"><CardContent className="p-3"><div className="text-xs text-gray-500">Supplier Payable</div><div className="text-base md:text-lg font-bold leading-tight break-words">{currencyGH(tripProfitabilitySummary.totalSupplierPayable)}</div></CardContent></Card><Card className="rounded-xl"><CardContent className="p-3"><div className="text-xs text-gray-500">Fuel Captured</div><div className="text-base md:text-lg font-bold leading-tight break-words">{currencyGH(tripProfitabilitySummary.totalFuelCost)}</div><div className="text-[11px] text-gray-500 leading-tight">Cost to MAALVILA: {currencyGH(tripProfitabilitySummary.totalFuelCostToProfit)}</div></CardContent></Card><Card className="rounded-xl"><CardContent className="p-3"><div className="text-xs text-gray-500">Fuel Receivable</div><div className="text-base md:text-lg font-bold leading-tight break-words">{currencyGH(tripProfitabilitySummary.totalFuelReceivable)}</div><div className="text-[11px] text-gray-500 leading-tight">Reimbursed: {currencyGH(tripProfitabilitySummary.totalFuelReimbursed)}</div><div className="text-[11px] text-gray-500 leading-tight">Balance: {currencyGH(tripProfitabilitySummary.totalFuelReceivableBalance)}</div></CardContent></Card><Card className="rounded-xl"><CardContent className="p-3"><div className="text-xs text-gray-500">Trip Profit</div><div className={`text-base md:text-lg font-bold leading-tight break-words ${tripProfitabilitySummary.totalProfit < 0 ? "text-red-700" : "text-emerald-700"}`}>{currencyGH(tripProfitabilitySummary.totalProfit)}</div></CardContent></Card><Card className="rounded-xl"><CardContent className="p-3"><div className="text-xs text-gray-500">Loss / Awaiting Closeout</div><div className="text-base md:text-lg font-bold leading-tight break-words">{tripProfitabilitySummary.lossTrips} / {tripProfitabilitySummary.awaitingCloseout}</div></CardContent></Card></div><div className="overflow-auto"><table className="w-full text-sm"><thead><tr className="text-left border-b text-gray-600"><th className="py-2 pr-3">Trip</th><th className="py-2 pr-3">Vehicle / Route</th><th className="py-2 pr-3">Source</th><th className="py-2 pr-3 text-right">Client Net</th><th className="py-2 pr-3 text-right">Supplier Payable</th><th className="py-2 pr-3 text-right">Fuel Treatment</th><th className="py-2 pr-3 text-right">KM</th><th className="py-2 pr-3 text-right">Profit</th><th className="py-2 pr-3 text-right">Profit / KM</th><th className="py-2 pr-3">Status</th></tr></thead><tbody>{tripProfitabilityRows.map((row, idx) => <tr key={`${row.key}-${idx}`} className="border-b"><td className="py-2 pr-3"><b>{row.customer}</b><br /><span className="text-xs text-gray-500">{row.firstDate ? toISODateString(row.firstDate) : "—"} → {row.lastDate ? toISODateString(row.lastDate) : "—"}</span><br /><span className="text-xs text-gray-500">Driver: {row.driver}</span></td><td className="py-2 pr-3"><b>{row.carName}</b> ({row.carNumber})<br /><span className="text-xs text-gray-500">{row.route}</span></td><td className="py-2 pr-3">{row.sourceName}</td><td className="py-2 pr-3 text-right">{currencyGH(row.clientNet)}</td><td className="py-2 pr-3 text-right">{currencyGH(row.supplierPayable)}</td><td className="py-2 pr-3 text-right">{row.fuelBillingMode === "maalvila_absorbed" ? <><b>{currencyGH(row.fuelCostToProfit)}</b><br /><span className="text-xs text-red-600">MAALVILA cost</span></> : row.fuelBillingMode === "maalvila_reimbursable" ? <><b>{currencyGH(row.fuelReceivable)}</b><br /><span className="text-xs text-blue-600">Bill client with receipt</span><br /><span className="text-xs text-gray-500">Paid: {currencyGH(row.fuelReimbursed)}</span><br /><span className={row.fuelReceivableBalance > 0 ? "text-xs text-amber-700" : "text-xs text-emerald-700"}>Balance: {currencyGH(row.fuelReceivableBalance)}</span><br /><span className="text-xs text-gray-500">{row.fuelSettlementStatus}</span></> : <><b>{currencyGH(row.fuelCost)}</b><br /><span className="text-xs text-gray-500">Client paid direct</span></>}</td><td className="py-2 pr-3 text-right">{row.kmCovered ? Number(row.kmCovered).toLocaleString() : "—"}</td><td className={`py-2 pr-3 text-right font-semibold ${row.tripProfit < 0 ? "text-red-700" : "text-emerald-700"}`}>{currencyGH(row.tripProfit)}<br /><span className="text-xs text-gray-500">{row.profitMarginPct.toFixed(1)}%</span></td><td className="py-2 pr-3 text-right">{row.kmCovered ? currencyGH(row.profitPerKm) : "—"}</td><td className="py-2 pr-3"><span className={`inline-flex px-2 py-1 border rounded-xl text-xs ${row.statusClass}`}>{row.statusLabel}</span></td></tr>)}{!tripProfitabilityRows.length && <tr><td colSpan={10} className="py-3 text-gray-500">No trip profitability rows found.</td></tr>}</tbody></table></div><div className="text-xs text-gray-500">Note: Trip Profit = Client Net - Supplier Payable - MAALVILA-absorbed fuel cost only. Fuel paid directly by client is informational. Fuel paid by MAALVILA for later billing is tracked as a fuel receivable with receipt/reimbursement details until settled.</div></CardContent></Card>
