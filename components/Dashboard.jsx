@@ -2476,8 +2476,112 @@ export default function Dashboard() {
   };
   const updateBookingItem = (itemId, patch) => setBookingItems((items) => items.map((item) => item.itemId === itemId ? { ...item, ...patch } : item));
   const addBookingItem = () => setBookingItems((items) => [...items, { ...blankBookingItem(), clientVatMode: getDefaultClientVatMode(companyProfile) }]);
+
+  const addShortTermRateSegment = (parentItemId) => {
+    if (hireType !== "short_term") {
+      alert("Multi-location rate segments are currently available for short-term hire only.");
+      return;
+    }
+
+    setBookingItems((items) => {
+      const parentIndex = items.findIndex((item) => item.itemId === parentItemId);
+      if (parentIndex < 0) return items;
+
+      const parent = items[parentIndex];
+      const rootSegmentId =
+        parent.segmentGroupId ||
+        parent.rateSegmentOf ||
+        parent.itemId;
+
+      const relatedSegmentCount = items.filter(
+        (item) =>
+          item.itemId === rootSegmentId ||
+          item.segmentGroupId === rootSegmentId ||
+          item.rateSegmentOf === rootSegmentId
+      ).length;
+
+      const newSegment = {
+        ...blankBookingItem(),
+        carNumber: parent.carNumber || "",
+        driver: parent.driver || "",
+        driverPhone: parent.driverPhone || "",
+        travelFrom: parent.travelTo || "",
+        travelTo: "",
+        selectedDates: [],
+        supplierRate: "",
+        adminCharge: "",
+        discountType: parent.discountType || "none",
+        discountValue: parent.discountValue || "",
+        clientVatMode:
+          parent.clientVatMode ||
+          getDefaultClientVatMode(companyProfile),
+        supplierDiscountSharePct:
+          parent.supplierDiscountSharePct ?? 50,
+        adminDiscountSharePct:
+          parent.adminDiscountSharePct ?? 50,
+        bookingLineType: "rate_segment",
+        rateSegmentOf: rootSegmentId,
+        segmentGroupId: rootSegmentId,
+        segmentNumber: relatedSegmentCount + 1
+      };
+
+      const nextItems = [...items];
+      nextItems.splice(parentIndex + 1, 0, newSegment);
+      return nextItems;
+    });
+  };
+
   const removeBookingItem = (itemId) => setBookingItems((items) => items.length <= 1 ? items : items.filter((item) => item.itemId !== itemId));
   const validateBooking = () => {
+    if (hireType === "short_term") {
+      for (
+        let firstIndex = 0;
+        firstIndex < bookingItems.length;
+        firstIndex += 1
+      ) {
+        const firstItem = bookingItems[firstIndex];
+        const firstDates = normalizeSelectedDates(
+          firstItem.selectedDates
+        );
+
+        for (
+          let secondIndex = firstIndex + 1;
+          secondIndex < bookingItems.length;
+          secondIndex += 1
+        ) {
+          const secondItem = bookingItems[secondIndex];
+
+          if (
+            String(firstItem.carNumber || "") !==
+            String(secondItem.carNumber || "")
+          ) {
+            continue;
+          }
+
+          const secondDates = normalizeSelectedDates(
+            secondItem.selectedDates
+          );
+
+          const duplicateDates = firstDates
+            .filter((firstDate) =>
+              secondDates.some((secondDate) =>
+                sameDay(firstDate, secondDate)
+              )
+            )
+            .map(toISODateString);
+
+          if (duplicateDates.length) {
+            return [
+              "Duplicate short-term rate segment dates detected.",
+              "",
+              `Vehicle ${firstItem.carNumber} appears more than once on: ${duplicateDates.join(", ")}`,
+              "",
+              "Place each date in only one location/rate segment to avoid double billing."
+            ].join("\n");
+          }
+        }
+      }
+    }
     if (!customer) return "Fill customer name.";
     if (!bookingItems.length) return "Add at least one vehicle line.";
     for (const item of bookingItems) {
@@ -3971,7 +4075,42 @@ export default function Dashboard() {
 
     {activeView === "cars" && <><Card className="rounded-2xl shadow"><CardContent className="p-4 space-y-3"><h2 className="text-lg font-semibold">Add Source / Supplier</h2>{can(role, "addSource") ? <><div className="grid md:grid-cols-3 gap-2"><Input placeholder="Source Name" value={newSourceName} onChange={(e) => setNewSourceName(e.target.value)} /><select className="border rounded-lg p-2 text-sm h-10" value={newSourceType} onChange={(e) => setNewSourceType(e.target.value)}><option value="main">Main / MAALVILA</option><option value="rental_company">Attached Rental Company</option><option value="individual">Individual / Other</option></select><Input placeholder="Contact Person" value={newSourceContactPerson} onChange={(e) => setNewSourceContactPerson(e.target.value)} /><Input placeholder="Phone" value={newSourcePhone} onChange={(e) => setNewSourcePhone(e.target.value)} /><Input placeholder="Email" value={newSourceEmail} onChange={(e) => setNewSourceEmail(e.target.value)} /><Input placeholder="Address" value={newSourceAddress} onChange={(e) => setNewSourceAddress(e.target.value)} /></div><Button onClick={addSource}>Add Source</Button></> : <div className="text-sm text-gray-500">Only Admin can add sources.</div>}</CardContent></Card><Card className="rounded-2xl shadow"><CardContent className="p-4 space-y-3"><h2 className="text-lg font-semibold">Add Car</h2>{can(role, "addCar") ? <><div className="grid md:grid-cols-4 gap-2"><Input placeholder="Car Name" value={newCarName} onChange={(e) => setNewCarName(e.target.value)} /><Input placeholder="Car Number" value={newCarNumber} onChange={(e) => setNewCarNumber(e.target.value)} /><select className="border rounded-lg p-2 text-sm h-10" value={newCarSourceId} onChange={(e) => setNewCarSourceId(e.target.value)}><option value="">Select Source</option>{sources.map((s) => <option key={s.id} value={s.id}>{s.sourceName} — {sourceTypeLabel(s.sourceType)}</option>)}</select><Button onClick={addCar}>Add Car</Button></div></> : <div className="text-sm text-gray-500">Only Admin can add cars.</div>}</CardContent></Card><Card className="rounded-2xl shadow"><CardContent className="p-4 space-y-3"><div className="flex flex-col md:flex-row md:items-center md:justify-between gap-2"><div><h2 className="text-lg font-semibold">Fleet Data Quality Checks</h2><div className="text-sm text-gray-600">Flags duplicate registration numbers and cars without a valid source before they create scheduling confusion.</div></div><div className="text-xs text-gray-500">This section does not change KPI calculations.</div></div><div className="grid md:grid-cols-2 gap-3"><div className="border rounded-xl p-3 bg-white"><div className="font-semibold text-sm mb-2">Duplicate Car Numbers</div>{duplicateCarNumberGroups.length ? <div className="space-y-2">{duplicateCarNumberGroups.map((dup) => <div key={dup.normalizedNumber} className="text-sm p-2 rounded-lg bg-amber-50 border border-amber-200"><div className="font-semibold">{dup.normalizedNumber}</div><div className="text-xs text-gray-700">{dup.group.map((car) => `${car.name || "Unnamed"} — ${car.sourceName || "No source"}`).join(" | ")}</div></div>)}</div> : <div className="text-sm text-emerald-700 bg-emerald-50 border border-emerald-200 rounded-lg p-2">No duplicate car numbers detected.</div>}</div><div className="border rounded-xl p-3 bg-white"><div className="font-semibold text-sm mb-2">Cars Without Valid Source</div>{unassignedCars.length ? <div className="space-y-2">{unassignedCars.map((car) => <div key={car.id || car.number} className="text-sm p-2 rounded-lg bg-rose-50 border border-rose-200"><b>{car.name || "Unnamed"}</b> ({car.number || "No number"})<div className="text-xs text-gray-700">Current source: {car.sourceName || "Not assigned"}</div></div>)}</div> : <div className="text-sm text-emerald-700 bg-emerald-50 border border-emerald-200 rounded-lg p-2">All cars have valid sources.</div>}</div></div><div className="text-xs text-gray-500">For duplicate numbers already in Firestore, keep the correct vehicle and remove or correct the duplicate record manually in Firebase Console if needed.</div></CardContent></Card><Card className="rounded-2xl shadow"><CardContent className="p-4"><h2 className="text-lg font-semibold mb-3">Sources / Suppliers</h2><div className="overflow-auto"><table className="w-full text-sm"><thead><tr className="text-left text-gray-600 border-b"><th className="py-2 pr-4">Source</th><th className="py-2 pr-4">Type</th><th className="py-2 pr-4">Cars</th><th className="py-2 pr-4">Bookings</th><th className="py-2 pr-4">Vehicle Lines</th><th className="py-2 pr-4">Supplier Payable</th><th className="py-2 pr-4">Admin Income</th></tr></thead><tbody>{sourceSummary.map((s) => <tr key={s.sourceId} className="border-b"><td className="py-2 pr-4 font-medium">{s.sourceName}</td><td className="py-2 pr-4"><span className={`inline-flex items-center px-2 py-1 border rounded-xl text-xs ${sourceBadgeClass(s.sourceType)}`}>{sourceTypeLabel(s.sourceType)}</span></td><td>{s.cars}</td><td>{s.bookings}</td><td>{s.vehicleLines}</td><td>{currencyGH(s.netSupplierPayable)}</td><td>{currencyGH(s.adminIncome)}</td></tr>)}{!sourceSummary.length && <tr><td colSpan={7} className="py-3 text-gray-500">No sources added yet.</td></tr>}</tbody></table></div></CardContent></Card><Card className="rounded-2xl shadow"><CardContent className="p-4"><h2 className="text-lg font-semibold mb-3">Cars List</h2><table className="w-full text-sm"><tbody>{cars.map((c) => <tr key={c.id} className="border-b"><td className="py-2 font-medium">{c.name}</td><td>{c.number}</td><td>{c.sourceName || "Not assigned"}</td><td>{sourceTypeLabel(c.sourceType)}</td></tr>)}{!cars.length && <tr><td className="py-3 text-gray-500">No cars added yet.</td></tr>}</tbody></table></CardContent></Card></>}
 
-    {activeView === "bookings" && <><Card className="rounded-2xl shadow"><CardContent className="p-4 space-y-4"><div className="flex items-center justify-between gap-2"><h2 className="text-lg font-semibold">{editBookingId ? "Edit Multi-Car Booking" : "New Multi-Car Booking"}</h2><div className="text-xs text-gray-500">One client booking can now include multiple cars.</div></div>{can(role, "addBooking") ? <><div className="grid md:grid-cols-4 gap-2 items-start"><div className="space-y-1"><Input placeholder="Customer Name" list="existing-customer-list" value={customer} onChange={(e) => populateExistingCustomer(e.target.value)} /><datalist id="existing-customer-list">{customerDirectory.map((c) => <option key={`${c.name}-${c.email}-${c.phone}`} value={c.name}>{[c.email, c.phone].filter(Boolean).join(" • ")}</option>)}</datalist><div className="text-xs text-gray-500">Existing customer search: type or select from {customerDirectory.length} saved customer(s).</div></div><Input placeholder="Customer Email" value={customerEmail} onChange={(e) => setCustomerEmail(e.target.value)} /><Input placeholder="Customer Phone" value={customerPhone} onChange={(e) => setCustomerPhone(e.target.value)} /><select className="border rounded-lg p-2 text-sm h-10" value={preferredChannel} onChange={(e) => setPreferredChannel(e.target.value)}><option value="email">Email</option><option value="whatsapp" disabled>WhatsApp later</option><option value="sms" disabled>SMS later</option></select></div><div className="text-sm p-2 rounded-lg bg-white border">Client Net Preview: <b>{currencyGH(formTotals.totalNetClientAmount)}</b></div><div className="text-sm p-2 rounded-lg bg-amber-50 border border-amber-200">Enter route, driver, and trip days inside each vehicle line. Different cars can share the same dates or have different routes/dates.</div><div className="space-y-3"><div className="flex items-center justify-between"><h3 className="font-semibold">Vehicle Line Items</h3><Button type="button" variant="outline" onClick={addBookingItem} className="gap-2"><Plus className="w-4 h-4" /> Add Car Line</Button></div>{bookingItems.map((item, idx) => { const computed = formItemsComputed.find((x) => x.itemId === item.itemId) || computeItemSplit(item, [], cars); return <Card key={item.itemId} className="rounded-xl border bg-white"><CardContent className="p-3 space-y-3"><div className="flex items-center justify-between"><div className="font-semibold text-sm">Vehicle Line {idx + 1}</div>{bookingItems.length > 1 && <Button variant="outline" size="sm" className="gap-2" onClick={() => removeBookingItem(item.itemId)}><Trash2 className="w-4 h-4" /> Remove</Button>}</div><div className="grid md:grid-cols-5 gap-2"><select className="border rounded-lg p-2 text-sm h-10" value={item.carNumber} onChange={(e) => { const c = cars.find((x) => String(x.number) === String(e.target.value)); const defaultSupplierPct = c?.sourceType === "main" ? 0 : 50; const defaultAdminPct = c?.sourceType === "main" ? 100 : 50; updateBookingItem(item.itemId, { carNumber: e.target.value, supplierDiscountSharePct: defaultSupplierPct, adminDiscountSharePct: defaultAdminPct }); }}><option value="">Select Car</option>{cars.map((c) => <option key={c.id} value={c.number}>{c.name} ({c.number}) — {c.sourceName || "No source"}</option>)}</select><Input placeholder="Travel From for this car" value={item.travelFrom || ""} onChange={(e) => updateBookingItem(item.itemId, { travelFrom: e.target.value })} /><Input placeholder="Travel To for this car" value={item.travelTo || ""} onChange={(e) => updateBookingItem(item.itemId, { travelTo: e.target.value })} /><Input placeholder="Driver for this car" value={item.driver || ""} onChange={(e) => updateBookingItem(item.itemId, { driver: e.target.value })} /><Input placeholder="Driver Contact" value={item.driverPhone || ""} onChange={(e) => updateBookingItem(item.itemId, { driverPhone: e.target.value })} /></div><div className="grid md:grid-cols-4 gap-2"><Input type="number" placeholder="Supplier Rate (GHS)" value={item.supplierRate} onChange={(e) => updateBookingItem(item.itemId, { supplierRate: e.target.value })} /><Input type="number" placeholder="MAALVILA Admin Charge (GHS)" value={item.adminCharge} onChange={(e) => updateBookingItem(item.itemId, { adminCharge: e.target.value })} /><select className="border rounded-lg p-2 text-sm h-10" value={item.clientVatMode || getDefaultClientVatMode(companyProfile)} onChange={(e) => updateBookingItem(item.itemId, { clientVatMode: e.target.value })}><option value="exclusive">VAT Exclusive - add tax on top</option><option value="inclusive">VAT Inclusive - extract tax from rate</option><option value="none">No VAT / VAT not required</option><option value="exempt">VAT Exempt client</option></select><div className="text-sm p-2 border rounded-lg bg-slate-50">Client Daily: <b>{currencyGH(computed.clientDailyRate)}</b></div></div><div className="grid md:grid-cols-5 gap-2"><select className="border rounded-lg p-2 text-sm h-10" value={item.discountType} onChange={(e) => updateBookingItem(item.itemId, { discountType: e.target.value, discountValue: e.target.value === "none" ? "" : item.discountValue })}><option value="none">No Discount</option><option value="fixed">Fixed Amount (GHS)</option><option value="percentage">Percentage of Client Gross (%)</option></select><Input type="number" placeholder={item.discountType === "fixed" ? "Discount Amount (GHS), e.g. 120" : item.discountType === "percentage" ? "Discount Rate %, e.g. 5" : "No Discount"} value={item.discountValue} disabled={item.discountType === "none"} onChange={(e) => updateBookingItem(item.itemId, { discountValue: e.target.value })} /><Input type="number" placeholder="Supplier Share %" value={item.supplierDiscountSharePct} onChange={(e) => updateBookingItem(item.itemId, { supplierDiscountSharePct: e.target.value })} /><Input type="number" placeholder="MAALVILA Share %" value={item.adminDiscountSharePct} onChange={(e) => updateBookingItem(item.itemId, { adminDiscountSharePct: e.target.value })} /><div className="text-xs p-2 border rounded-lg bg-slate-50">Shares: {Number(item.supplierDiscountSharePct || 0) + Number(item.adminDiscountSharePct || 0)}%</div></div><div className="border rounded-xl p-2 bg-white"><div className="text-sm font-medium flex items-center gap-2 mb-2"><CalendarDays className="w-4 h-4" />Trip Days for this car line</div><div className="inline-block border rounded-xl p-2 bg-white"><Calendar mode="multiple" selected={normalizeSelectedDates(item.selectedDates)} onSelect={(dates) => updateBookingItem(item.itemId, { selectedDates: normalizeSelectedDates(dates) })} className="rounded-lg" /></div><div className="text-xs text-gray-500 mt-2">Selected: {normalizeSelectedDates(item.selectedDates).map(toISODateString).join(", ") || "None"}</div></div><div className="grid md:grid-cols-4 gap-2 text-xs text-gray-700"><div className="p-2 rounded-lg bg-blue-50 border">Client Gross: <b>{currencyGH(computed.grossClientAmount)}</b><br />Discount: <b>{currencyGH(computed.discountAmount)}</b><br />Client Net: <b>{currencyGH(computed.netClientAmount)}</b></div><div className="p-2 rounded-lg bg-indigo-50 border">VAT Treatment: <b>{clientVatModeLabel(computed.clientVatMode)}</b><br />Tax: <b>{currencyGH(computed.taxAmount)}</b><br />Client Grand: <b>{currencyGH(computed.clientGrandTotal)}</b></div><div className="p-2 rounded-lg bg-rose-50 border">Supplier Gross: <b>{currencyGH(computed.grossSupplierAmount)}</b><br />Discount Share: <b>{currencyGH(computed.supplierDiscountShare)}</b><br />Payable: <b>{currencyGH(computed.netSupplierPayable)}</b></div><div className="p-2 rounded-lg bg-emerald-50 border">Admin Gross: <b>{currencyGH(computed.grossAdminAmount)}</b><br />Discount Share: <b>{currencyGH(computed.adminDiscountShare)}</b><br />Admin Income: <b>{currencyGH(computed.netAdminIncome)}</b></div></div></CardContent></Card>; })}</div>
+    {activeView === "bookings" && <><Card className="rounded-2xl shadow"><CardContent className="p-4 space-y-4"><div className="flex items-center justify-between gap-2"><h2 className="text-lg font-semibold">{editBookingId ? "Edit Multi-Car Booking" : "New Multi-Car Booking"}</h2><div className="text-xs text-gray-500">One client booking can now include multiple cars.</div></div>{can(role, "addBooking") ? <><div className="grid md:grid-cols-4 gap-2 items-start"><div className="space-y-1"><Input placeholder="Customer Name" list="existing-customer-list" value={customer} onChange={(e) => populateExistingCustomer(e.target.value)} /><datalist id="existing-customer-list">{customerDirectory.map((c) => <option key={`${c.name}-${c.email}-${c.phone}`} value={c.name}>{[c.email, c.phone].filter(Boolean).join(" • ")}</option>)}</datalist><div className="text-xs text-gray-500">Existing customer search: type or select from {customerDirectory.length} saved customer(s).</div></div><Input placeholder="Customer Email" value={customerEmail} onChange={(e) => setCustomerEmail(e.target.value)} /><Input placeholder="Customer Phone" value={customerPhone} onChange={(e) => setCustomerPhone(e.target.value)} /><select className="border rounded-lg p-2 text-sm h-10" value={preferredChannel} onChange={(e) => setPreferredChannel(e.target.value)}><option value="email">Email</option><option value="whatsapp" disabled>WhatsApp later</option><option value="sms" disabled>SMS later</option></select></div><div className="text-sm p-2 rounded-lg bg-white border">Client Net Preview: <b>{currencyGH(formTotals.totalNetClientAmount)}</b></div><div className="text-sm p-2 rounded-lg bg-amber-50 border border-amber-200">Enter route, driver, and trip days inside each vehicle line. Different cars can share dates or have different routes/dates. For one vehicle travelling to locations with different rates, use Add Location / Rate Segment and assign the relevant dates and price to each segment.</div><div className="space-y-3"><div className="flex items-center justify-between"><div>
+    <h3 className="font-semibold">Vehicle and Location/Rate Lines</h3>
+    <div className="text-xs text-gray-500">
+      One vehicle may have several location/rate segments within the same short-term booking.
+    </div>
+  </div><Button type="button" variant="outline" onClick={addBookingItem} className="gap-2"><Plus className="w-4 h-4" /> Add Car Line</Button></div>{bookingItems.map((item, idx) => { const computed = formItemsComputed.find((x) => x.itemId === item.itemId) || computeItemSplit(item, [], cars); return <Card key={item.itemId} className="rounded-xl border bg-white"><CardContent className="p-3 space-y-3"><div className="flex items-center justify-between"><div className="font-semibold text-sm">
+    {item.bookingLineType === "rate_segment" || item.rateSegmentOf
+      ? `Location / Rate Segment ${item.segmentNumber || idx + 1}`
+      : `Vehicle Line ${idx + 1}`}
+  </div>
+  <div className="flex flex-wrap gap-2">
+    {hireType === "short_term" && (
+      <Button
+        type="button"
+        variant="outline"
+        size="sm"
+        className="gap-2 border-blue-300 text-blue-700"
+        onClick={() => addShortTermRateSegment(item.itemId)}
+      >
+        <Plus className="w-4 h-4" />
+        Add Location / Rate Segment
+      </Button>
+    )}
+    {bookingItems.length > 1 && (
+      <Button
+        type="button"
+        variant="outline"
+        size="sm"
+        className="gap-2"
+        onClick={() => removeBookingItem(item.itemId)}
+      >
+        <Trash2 className="w-4 h-4" />
+        Remove
+      </Button>
+    )}
+  </div></div><div className="grid md:grid-cols-5 gap-2"><select className="border rounded-lg p-2 text-sm h-10" value={item.carNumber} onChange={(e) => { const c = cars.find((x) => String(x.number) === String(e.target.value)); const defaultSupplierPct = c?.sourceType === "main" ? 0 : 50; const defaultAdminPct = c?.sourceType === "main" ? 100 : 50; updateBookingItem(item.itemId, { carNumber: e.target.value, supplierDiscountSharePct: defaultSupplierPct, adminDiscountSharePct: defaultAdminPct }); }}><option value="">Select Car</option>{cars.map((c) => <option key={c.id} value={c.number}>{c.name} ({c.number}) — {c.sourceName || "No source"}</option>)}</select><Input placeholder="Travel From for this car" value={item.travelFrom || ""} onChange={(e) => updateBookingItem(item.itemId, { travelFrom: e.target.value })} /><Input placeholder="Travel To for this car" value={item.travelTo || ""} onChange={(e) => updateBookingItem(item.itemId, { travelTo: e.target.value })} /><Input placeholder="Driver for this car" value={item.driver || ""} onChange={(e) => updateBookingItem(item.itemId, { driver: e.target.value })} /><Input placeholder="Driver Contact" value={item.driverPhone || ""} onChange={(e) => updateBookingItem(item.itemId, { driverPhone: e.target.value })} /></div><div className="grid md:grid-cols-4 gap-2"><Input type="number" placeholder="Supplier Rate (GHS)" value={item.supplierRate} onChange={(e) => updateBookingItem(item.itemId, { supplierRate: e.target.value })} /><Input type="number" placeholder="MAALVILA Admin Charge (GHS)" value={item.adminCharge} onChange={(e) => updateBookingItem(item.itemId, { adminCharge: e.target.value })} /><select className="border rounded-lg p-2 text-sm h-10" value={item.clientVatMode || getDefaultClientVatMode(companyProfile)} onChange={(e) => updateBookingItem(item.itemId, { clientVatMode: e.target.value })}><option value="exclusive">VAT Exclusive - add tax on top</option><option value="inclusive">VAT Inclusive - extract tax from rate</option><option value="none">No VAT / VAT not required</option><option value="exempt">VAT Exempt client</option></select><div className="text-sm p-2 border rounded-lg bg-slate-50">Client Daily: <b>{currencyGH(computed.clientDailyRate)}</b></div></div><div className="grid md:grid-cols-5 gap-2"><select className="border rounded-lg p-2 text-sm h-10" value={item.discountType} onChange={(e) => updateBookingItem(item.itemId, { discountType: e.target.value, discountValue: e.target.value === "none" ? "" : item.discountValue })}><option value="none">No Discount</option><option value="fixed">Fixed Amount (GHS)</option><option value="percentage">Percentage of Client Gross (%)</option></select><Input type="number" placeholder={item.discountType === "fixed" ? "Discount Amount (GHS), e.g. 120" : item.discountType === "percentage" ? "Discount Rate %, e.g. 5" : "No Discount"} value={item.discountValue} disabled={item.discountType === "none"} onChange={(e) => updateBookingItem(item.itemId, { discountValue: e.target.value })} /><Input type="number" placeholder="Supplier Share %" value={item.supplierDiscountSharePct} onChange={(e) => updateBookingItem(item.itemId, { supplierDiscountSharePct: e.target.value })} /><Input type="number" placeholder="MAALVILA Share %" value={item.adminDiscountSharePct} onChange={(e) => updateBookingItem(item.itemId, { adminDiscountSharePct: e.target.value })} /><div className="text-xs p-2 border rounded-lg bg-slate-50">Shares: {Number(item.supplierDiscountSharePct || 0) + Number(item.adminDiscountSharePct || 0)}%</div></div><div className="border rounded-xl p-2 bg-white"><div className="text-sm font-medium flex items-center gap-2 mb-2"><CalendarDays className="w-4 h-4" />Trip Days for this car line</div><div className="inline-block border rounded-xl p-2 bg-white"><Calendar mode="multiple" selected={normalizeSelectedDates(item.selectedDates)} onSelect={(dates) => updateBookingItem(item.itemId, { selectedDates: normalizeSelectedDates(dates) })} className="rounded-lg" /></div><div className="text-xs text-gray-500 mt-2">Selected: {normalizeSelectedDates(item.selectedDates).map(toISODateString).join(", ") || "None"}</div></div><div className="grid md:grid-cols-4 gap-2 text-xs text-gray-700"><div className="p-2 rounded-lg bg-blue-50 border">Client Gross: <b>{currencyGH(computed.grossClientAmount)}</b><br />Discount: <b>{currencyGH(computed.discountAmount)}</b><br />Client Net: <b>{currencyGH(computed.netClientAmount)}</b></div><div className="p-2 rounded-lg bg-indigo-50 border">VAT Treatment: <b>{clientVatModeLabel(computed.clientVatMode)}</b><br />Tax: <b>{currencyGH(computed.taxAmount)}</b><br />Client Grand: <b>{currencyGH(computed.clientGrandTotal)}</b></div><div className="p-2 rounded-lg bg-rose-50 border">Supplier Gross: <b>{currencyGH(computed.grossSupplierAmount)}</b><br />Discount Share: <b>{currencyGH(computed.supplierDiscountShare)}</b><br />Payable: <b>{currencyGH(computed.netSupplierPayable)}</b></div><div className="p-2 rounded-lg bg-emerald-50 border">Admin Gross: <b>{currencyGH(computed.grossAdminAmount)}</b><br />Discount Share: <b>{currencyGH(computed.adminDiscountShare)}</b><br />Admin Income: <b>{currencyGH(computed.netAdminIncome)}</b></div></div></CardContent></Card>; })}</div>
 <Card className="rounded-2xl bg-slate-50 border-slate-200">
   <CardContent className="p-4 space-y-3">
     <div>
