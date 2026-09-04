@@ -518,9 +518,43 @@ function computeItemSplit(rawItem, fallbackSelectedDates = [], cars = []) {
   const supplierRate = clampMoney(rawItem.supplierRate);
   const adminCharge = clampMoney(rawItem.adminCharge);
   const clientDailyRate = supplierRate + adminCharge;
-  const grossSupplierAmount = supplierRate * days;
-  const grossAdminAmount = adminCharge * days;
-  const grossClientAmount = clientDailyRate * days;
+
+  // phase3x-c-long-term-aggregate-fix
+  const pricingBasis =
+    rawItem.pricingBasis === "monthly" ||
+    rawItem.pricingBasis === "fixed"
+      ? rawItem.pricingBasis
+      : "daily";
+
+  const isContractPriced =
+    pricingBasis !== "daily" &&
+    Object.prototype.hasOwnProperty.call(
+      rawItem,
+      "longTermContractAmount"
+    );
+
+  const contractAmount = isContractPriced
+    ? clampMoney(rawItem.longTermContractAmount)
+    : 0;
+
+  const componentTotal = supplierRate + adminCharge;
+
+  const supplierRatio =
+    componentTotal > 0
+      ? supplierRate / componentTotal
+      : 0;
+
+  const grossSupplierAmount = isContractPriced
+    ? contractAmount * supplierRatio
+    : supplierRate * days;
+
+  const grossAdminAmount = isContractPriced
+    ? Math.max(0, contractAmount - grossSupplierAmount)
+    : adminCharge * days;
+
+  const grossClientAmount = isContractPriced
+    ? contractAmount
+    : clientDailyRate * days;
   const discountType = rawItem.discountType || "none";
   const discountValue = Number(rawItem.discountValue || 0);
   const discountAmount = computeDiscountAmount(grossClientAmount, discountType, discountValue);
@@ -573,6 +607,11 @@ function computeItemSplit(rawItem, fallbackSelectedDates = [], cars = []) {
     supplierRate,
     adminCharge,
     clientDailyRate,
+    pricingBasis,
+    pricingUnits: isContractPriced ? 1 : days,
+    longTermContractAmount: isContractPriced
+      ? contractAmount
+      : 0,
     discountType,
     discountValue: Number.isFinite(discountValue) ? discountValue : 0,
     clientVatMode,
@@ -774,15 +813,56 @@ function getBookingItems(b, cars = []) {
   return [computeItemSplit(legacyItem, dates, cars)];
 }
 function getBookingTotals(b, cars = []) {
-  if (b?.pricingTotals && typeof b.pricingTotals === "object") return { ...emptyPricingTotals(), ...b.pricingTotals };
-  return computePricingTotals(getBookingItems(b, cars));
+  const isLongTermContractPriced =
+    b?.hireType === "long_term" &&
+    (
+      b?.longTermPricingBasis === "monthly" ||
+      b?.longTermPricingBasis === "fixed"
+    );
+
+  if (isLongTermContractPriced) {
+    return computePricingTotals(
+      getBookingItems(b, cars)
+    );
+  }
+
+  if (
+    b?.pricingTotals &&
+    typeof b.pricingTotals === "object"
+  ) {
+    return {
+      ...emptyPricingTotals(),
+      ...b.pricingTotals
+    };
+  }
+
+  return computePricingTotals(
+    getBookingItems(b, cars)
+  );
 }
 function computeBookingTotalAmount(b, cars = []) {
   const totals = getBookingTotals(b, cars);
   const fuelInvoiceAmount = getBookingFuelInvoiceAmount(b);
   if (b?.status === "cancelled") return Number(b?.penalty || 0) > 0 ? Number(b.penalty) : 0;
-  if (b?.status === "confirmed" && Number(b?.confirmedAmount || 0) > 0) return Number(b.confirmedAmount);
-  return totals.totalNetClientAmount + fuelInvoiceAmount;
+  const isLongTermContractPriced =
+    b?.hireType === "long_term" &&
+    (
+      b?.longTermPricingBasis === "monthly" ||
+      b?.longTermPricingBasis === "fixed"
+    );
+
+  if (
+    !isLongTermContractPriced &&
+    b?.status === "confirmed" &&
+    Number(b?.confirmedAmount || 0) > 0
+  ) {
+    return Number(b.confirmedAmount);
+  }
+
+  return (
+    totals.totalNetClientAmount +
+    fuelInvoiceAmount
+  );
 }
 
 // phase3v-e2-documents-show-options-fuel
@@ -1139,8 +1219,6 @@ export default function Dashboard() {
       selectedDates: hireType === "long_term" && formLongTermPeriodInfo.chargeableDates.length
         ? formLongTermPeriodInfo.chargeableDates
         : item.selectedDates,
-      clientDailyRate: isLongTermContractPriced ? contractLineAmount : item.clientDailyRate,
-      adminCharge: isLongTermContractPriced ? contractLineAmount - clampMoney(item.supplierRate || 0) : item.adminCharge,
       pricingBasis: hireType === "long_term" ? longTermPricingBasis : "daily",
       longTermContractAmount: isLongTermContractPriced ? contractLineAmount : 0,
       weekendBillingMode,
@@ -2689,8 +2767,6 @@ export default function Dashboard() {
         selectedDates: hireType === "long_term" && saveLongTermPeriodInfo.chargeableDates.length
           ? saveLongTermPeriodInfo.chargeableDates
           : item.selectedDates,
-        clientDailyRate: isLongTermContractPriced ? contractLineAmount : item.clientDailyRate,
-        adminCharge: isLongTermContractPriced ? contractLineAmount - clampMoney(item.supplierRate || 0) : item.adminCharge,
         pricingBasis: hireType === "long_term" ? longTermPricingBasis : "daily",
         longTermContractAmount: isLongTermContractPriced ? contractLineAmount : 0,
         weekendBillingMode,
